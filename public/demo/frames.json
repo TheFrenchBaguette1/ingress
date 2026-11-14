@@ -1,0 +1,324 @@
+{
+ "note": "SYNTHETIC demo frames. Not SPHEREx observations.",
+ "size_px": 192,
+ "pixel_arcsec": 6.15,
+ "fov_arcmin": 19.68,
+ "orientation": "North up, East left; target at image centre",
+ "dates": [
+  {
+   "id": "2025-05-07",
+   "time_utc": "03:12",
+   "visit": 0
+  },
+  {
+   "id": "2025-05-09",
+   "time_utc": "14:41",
+   "visit": 0
+  },
+  {
+   "id": "2025-05-12",
+   "time_utc": "08:26",
+   "visit": 0
+  },
+  {
+   "id": "2025-11-08",
+   "time_utc": "21:05",
+   "visit": 1
+  },
+  {
+   "id": "2025-11-10",
+   "time_utc": "10:33",
+   "visit": 1
+  },
+  {
+   "id": "2025-11-13",
+   "time_utc": "05:48",
+   "visit": 1
+  },
+  {
+   "id": "2026-05-06",
+   "time_utc": "17:20",
+   "visit": 2
+  },
+  {
+   "id": "2026-05-09",
+   "time_utc": "02:57",
+   "visit": 2
+  },
+  {
+   "id": "2026-05-11",
+   "time_utc": "19:09",
+   "visit": 2
+  }
+ ],
+ "bands": {
+  "2": {
+   "range_um": [
+    1.11,
+    1.64
+   ],
+   "frames": {
+    "2025-05-07": {
+     "file": "b2_2025-05-07.png",
+     "wavelength_um": 1.34,
+     "flags": [],
+     "mover_pct": [
+      48.96,
+      50.1
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    },
+    "2025-05-12": {
+     "file": "b2_2025-05-12.png",
+     "wavelength_um": 1.52,
+     "flags": [],
+     "mover_pct": [
+      48.99,
+      50.1
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    },
+    "2025-11-08": {
+     "file": "b2_2025-11-08.png",
+     "wavelength_um": 1.21,
+     "flags": [],
+     "mover_pct": [
+      50.01,
+      50.01
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    },
+    "2025-11-13": {
+     "file": "b2_2025-11-13.png",
+     "wavelength_um": 1.47,
+     "flags": [],
+     "mover_pct": [
+      50.03,
+      50.01
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    },
+    "2026-05-06": {
+     "file": "b2_2026-05-06.png",
+     "wavelength_um": 1.29,
+     "flags": [],
+     "mover_pct": [
+      51.02,
+      49.93
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    },
+    "2026-05-11": {
+     "file": "b2_2026-05-11.png",
+     "wavelength_um": 1.38,
+     "flags": [
+      {
+       "code": "partial",
+       "label": "Patch partly off the detector (simulated)"
+      }
+     ],
+     "mover_pct": [
+      51.05,
+      49.93
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    }
+   }
+  },
+  "4": {
+   "range_um": [
+    2.42,
+    3.82
+   ],
+   "frames": {
+    "2025-05-07": {
+     "file": "b4_2025-05-07.png",
+     "wavelength_um": 3.23,
+     "flags": [],
+     "mover_pct": [
+      48.96,
+      50.1
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    },
+    "2025-05-09": {
+     "file": "b4_2025-05-09.png",
+     "wavelength_um": 2.71,
+     "flags": [],
+     "mover_pct": [
+      48.97,
+      50.1
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    },
+    "2025-05-12": {
+     "file": "b4_2025-05-12.png",
+     "wavelength_um": 3.47,
+     "flags": [],
+     "mover_pct": [
+      48.99,
+      50.1
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    },
+    "2025-11-08": {
+     "file": "b4_2025-11-08.png",
+     "wavelength_um": 3.05,
+     "flags": [],
+     "mover_pct": [
+      50.01,
+      50.01
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    },
+    "2025-11-13": {
+     "file": "b4_2025-11-13.png",
+     "wavelength_um": 2.86,
+     "flags": [
+      {
+       "code": "cosmic_ray",
+       "label": "Cosmic-ray hit near target (simulated)"
+      }
+     ],
+     "mover_pct": [
+      50.03,
+      50.01
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    },
+    "2026-05-06": {
+     "file": "b4_2026-05-06.png",
+     "wavelength_um": 3.31,
+     "flags": [],
+     "mover_pct": [
+      51.02,
+      49.93
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    },
+    "2026-05-09": {
+     "file": "b4_2026-05-09.png",
+     "wavelength_um": 2.58,
+     "flags": [],
+     "mover_pct": [
+      51.03,
+      49.93
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    },
+    "2026-05-11": {
+     "file": "b4_2026-05-11.png",
+     "wavelength_um": 3.19,
+     "flags": [],
+     "mover_pct": [
+      51.05,
+      49.93
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    }
+   }
+  },
+  "6": {
+   "range_um": [
+    4.42,
+    5.0
+   ],
+   "frames": {
+    "2025-05-09": {
+     "file": "b6_2025-05-09.png",
+     "wavelength_um": 4.61,
+     "flags": [],
+     "mover_pct": [
+      48.97,
+      50.1
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    },
+    "2025-11-10": {
+     "file": "b6_2025-11-10.png",
+     "wavelength_um": 4.83,
+     "flags": [],
+     "mover_pct": [
+      50.02,
+      50.01
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    },
+    "2025-11-13": {
+     "file": "b6_2025-11-13.png",
+     "wavelength_um": 4.52,
+     "flags": [],
+     "mover_pct": [
+      50.03,
+      50.01
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    },
+    "2026-05-09": {
+     "file": "b6_2026-05-09.png",
+     "wavelength_um": 4.7,
+     "flags": [],
+     "mover_pct": [
+      51.03,
+      49.93
+     ],
+     "variable_pct": [
+      57.29,
+      54.69
+     ]
+    }
+   }
+  }
+ }
+}
