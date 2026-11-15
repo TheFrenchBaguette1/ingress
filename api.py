@@ -2,11 +2,13 @@ import logging
 import json
 import re
 from collections import OrderedDict
+from pathlib import Path
 from threading import Lock
 from time import time
 
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import config
@@ -21,7 +23,9 @@ from prepare import PrepareRequest, get_prepare, start_prepare
 from zoom import ZoomRequest, ZoomUnavailable, build_zoom
 
 
-app = FastAPI(title="Ingress Backend")
+app = FastAPI(title="Ingress")
+router = APIRouter()
+SITE_ROOT = Path(__file__).resolve().parent
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,6 +42,18 @@ app.mount(
     StaticFiles(directory=str(config.OUTPUT_ROOT)),
     name="outputs",
 )
+app.mount("/src", StaticFiles(directory=SITE_ROOT / "src"), name="frontend")
+app.mount("/public", StaticFiles(directory=SITE_ROOT / "public"), name="public")
+
+
+@app.get("/", include_in_schema=False)
+def viewer():
+    return FileResponse(SITE_ROOT / "index.html")
+
+
+@app.get("/healthz", include_in_schema=False)
+def health():
+    return {"status": "ok"}
 
 # Keep this first prototype to one sequence build at a time.
 build_lock = Lock()
@@ -62,7 +78,7 @@ def remember_sequence(key, result, created_at=None):
             sequence_cache.popitem(last=False)
 
 
-@app.get("/bands")
+@router.get("/bands")
 def get_bands():
     return {
         "bands": [
@@ -75,7 +91,7 @@ def get_bands():
     }
 
 
-@app.post("/sequence")
+@router.post("/sequence")
 def create_sequence(request: SequenceRequest, refresh: bool = False):
     key = request.model_dump_json()
     if not refresh:
@@ -123,7 +139,7 @@ def create_sequence(request: SequenceRequest, refresh: bool = False):
         build_lock.release()
 
 
-@app.post("/zoom")
+@router.post("/zoom")
 def zoom_sequence(request: ZoomRequest, refresh: bool = False):
     # A concurrent zoom of the same sequence may write the same PNG paths.
     # Waiting here is safe; this never starts another archive index search.
@@ -137,13 +153,13 @@ def zoom_sequence(request: ZoomRequest, refresh: bool = False):
             raise HTTPException(status_code=502, detail="Could not zoom this sequence. Check the backend terminal.")
 
 
-@app.post("/prepare")
+@router.post("/prepare")
 def prepare_bands(request: PrepareRequest, refresh: bool = False):
     """Start one bounded 20′ real-image job; the requested detector runs first."""
     return start_prepare(request, refresh=refresh)
 
 
-@app.get("/prepare/{job_id}")
+@router.get("/prepare/{job_id}")
 def prepare_status(job_id: str):
     if not re.fullmatch(r"[a-f0-9]{32}", job_id):
         raise HTTPException(status_code=404, detail="Unknown preparation job.")
@@ -153,7 +169,7 @@ def prepare_status(job_id: str):
     return result
 
 
-@app.post("/flipbook")
+@router.post("/flipbook")
 def create_flipbook(request: FlipbookRequest, refresh: bool = False):
     """Queue an observation timeline and return before archive or image work."""
     try:
@@ -162,7 +178,7 @@ def create_flipbook(request: FlipbookRequest, refresh: bool = False):
         raise HTTPException(status_code=503, detail=str(error), headers={"Retry-After": "3"}) from error
 
 
-@app.get("/flipbook/{job_id}")
+@router.get("/flipbook/{job_id}")
 def flipbook_status(job_id: str):
     result = get_flipbook(job_id) if re.fullmatch(r"[a-f0-9]{32}", job_id) else None
     if result is None:
@@ -170,7 +186,7 @@ def flipbook_status(job_id: str):
     return result
 
 
-@app.post("/flipbook/{job_id}/band/{band}")
+@router.post("/flipbook/{job_id}/band/{band}")
 def select_flipbook_band(job_id: str, band: str, refresh: bool = False):
     if not re.fullmatch(r"[a-f0-9]{32}", job_id) or not re.fullmatch(r"all|D[1-6]", band):
         raise HTTPException(status_code=404, detail="Unknown flipbook or detector.")
@@ -181,3 +197,8 @@ def select_flipbook_band(job_id: str, band: str, refresh: bool = False):
     if result is None:
         raise HTTPException(status_code=404, detail="Flipbook search has expired. Start it again.")
     return result
+
+
+app.include_router(router, prefix="/api")
+# The existing local Node proxy forwards API calls without the /api prefix.
+app.include_router(router, include_in_schema=False)
