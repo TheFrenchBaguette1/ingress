@@ -1,5 +1,6 @@
 """Archive metadata is shared between band searches without sharing mutable rows."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,11 @@ from sequence import SequenceRequest, build_sequence
 
 class ArchiveCacheTests(unittest.TestCase):
     def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.disk_cache_root = patch("archive_cache.config.OUTPUT_ROOT", Path(self.temporary.name))
+        self.disk_cache_root.start()
+        self.addCleanup(self.disk_cache_root.stop)
         clear_archive_cache()
 
     def tearDown(self):
@@ -59,6 +65,79 @@ class ArchiveCacheTests(unittest.TestCase):
         fetch = Mock(side_effect=[OSError("IRSA unavailable"), Table(names=["t_min"], dtype=[float])])
         with self.assertRaises(OSError):
             cached_search_observations(coord, 300, ["dr1"], start, end, fetch)
+        cached_search_observations(coord, 300, ["dr1"], start, end, fetch)
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_successful_listing_survives_process_restart_for_other_band(self):
+        coord = SkyCoord(120, -85, unit="deg")
+        start, end = Time("2025-05-01"), Time("2025-06-01")
+        listing = Table(
+            [[Time("2025-05-03").mjd, Time("2025-05-04").mjd],
+             ["SPHEREx-D3", "SPHEREx-D4"],
+             ["https://example.org/three.fits", "https://example.org/four.fits"]],
+            names=["t_min", "energy_bandpassname", "access_url"],
+        )
+        fetch = Mock(return_value=listing)
+        first = cached_search_observations(coord, 300, ["dr1"], start, end, fetch)
+        clear_archive_cache()  # Recreate the API process before another band.
+        second = cached_search_observations(coord, 300, ["dr1"], start, end, fetch)
+
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(second["energy_bandpassname"].tolist(), ["SPHEREx-D3", "SPHEREx-D4"])
+        second["access_url"][0] = "changed"
+        self.assertEqual(first["access_url"][0], "https://example.org/three.fits")
+
+    def test_saved_listing_expires_and_fetches_again(self):
+        coord = SkyCoord(120, -85, unit="deg")
+        start, end = Time("2025-05-01"), Time("2025-06-01")
+        listing = Table(
+            [[Time("2025-05-03").mjd], ["SPHEREx-D4"], ["https://example.org/a.fits"]],
+            names=["t_min", "energy_bandpassname", "access_url"],
+        )
+        fetch = Mock(return_value=listing)
+        cached_search_observations(coord, 300, ["dr1"], start, end, fetch)
+        saved = next((Path(self.temporary.name) / ".archive-listings").glob("*.json"))
+        payload = json.loads(saved.read_text(encoding="utf-8"))
+        payload["saved_at"] = 0
+        saved.write_text(json.dumps(payload), encoding="utf-8")
+        clear_archive_cache()
+        cached_search_observations(coord, 300, ["dr1"], start, end, fetch)
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_saved_listing_requires_exact_sky_and_utc_interval(self):
+        coord = SkyCoord(120, -85, unit="deg")
+        start, end = Time("2025-05-01"), Time("2025-06-01")
+        listing = Table(
+            [[Time("2025-05-03").mjd], ["SPHEREx-D4"], ["https://example.org/a.fits"]],
+            names=["t_min", "energy_bandpassname", "access_url"],
+        )
+        fetch = Mock(return_value=listing)
+        cached_search_observations(coord, 300, ["dr1"], start, end, fetch)
+        clear_archive_cache()
+        cached_search_observations(SkyCoord(121, -85, unit="deg"), 300, ["dr1"], start, end, fetch)
+        cached_search_observations(coord, 300, ["dr1"], start, Time("2025-07-01"), fetch)
+        self.assertEqual(fetch.call_count, 3)
+
+    def test_corrupt_saved_listing_never_blocks_archive_lookup(self):
+        coord = SkyCoord(120, -85, unit="deg")
+        start, end = Time("2025-05-01"), Time("2025-06-01")
+        listing = Table(
+            [[Time("2025-05-03").mjd], ["SPHEREx-D4"], ["https://example.org/a.fits"]],
+            names=["t_min", "energy_bandpassname", "access_url"],
+        )
+        fetch = Mock(return_value=listing)
+        cached_search_observations(coord, 300, ["dr1"], start, end, fetch)
+        saved = next((Path(self.temporary.name) / ".archive-listings").glob("*.json"))
+        saved.write_text("{broken", encoding="utf-8")
+        clear_archive_cache()
+        cached_search_observations(coord, 300, ["dr1"], start, end, fetch)
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_empty_listing_is_not_cached(self):
+        coord = SkyCoord(120, -85, unit="deg")
+        start, end = Time("2025-05-01"), Time("2025-06-01")
+        fetch = Mock(return_value=Table(names=["t_min"], dtype=[float]))
+        cached_search_observations(coord, 300, ["dr1"], start, end, fetch)
         cached_search_observations(coord, 300, ["dr1"], start, end, fetch)
         self.assertEqual(fetch.call_count, 2)
 

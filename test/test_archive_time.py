@@ -18,6 +18,15 @@ from sequence import SequenceRequest, build_sequence, time_spread_indexes
 
 
 class ArchiveTimeTests(unittest.TestCase):
+    def setUp(self):
+        # Isolate deliberate service failures from other test cases.
+        until = patch("archive._outage_until", 0.0)
+        probe = patch("archive._outage_probe", False)
+        until.start()
+        probe.start()
+        self.addCleanup(probe.stop)
+        self.addCleanup(until.stop)
+
     def test_query_sia_receives_utc_interval(self):
         coord = SkyCoord(120, -85, unit="deg")
         start = Time("2025-05-01", scale="utc")
@@ -73,6 +82,70 @@ class ArchiveTimeTests(unittest.TestCase):
         ):
             search_observations(coord, 600, ["spherex_dr1"], start, end)
         self.assertEqual(query.call_count, 2)
+
+    def test_confirmed_outage_short_circuits_then_recovers(self):
+        coord = SkyCoord(120, -85, unit="deg")
+        start = Time("2025-05-01", scale="utc")
+        end = Time("2025-06-01", scale="utc")
+        first_listing = object()
+        second_listing = object()
+        clock = [100.0]
+        with (
+            patch("archive.monotonic", side_effect=lambda: clock[0]),
+            patch("archive._BoundedIrsa.query_sia", side_effect=[
+                RuntimeError("502 Bad Gateway"),
+                RuntimeError("502 Bad Gateway"),
+                first_listing,
+                second_listing,
+            ]) as query,
+            patch("archive.sleep"),
+        ):
+            with self.assertRaises(ArchiveUnavailable):
+                search_observations(coord, 600, ["spherex_dr1"], start, end)
+            with self.assertRaises(ArchiveUnavailable):
+                search_observations(coord, 600, ["spherex_dr1"], start, end)
+            self.assertEqual(query.call_count, 2)
+
+            clock[0] += 16
+            self.assertIs(
+                search_observations(coord, 600, ["spherex_dr1"], start, end),
+                first_listing,
+            )
+            self.assertIs(
+                search_observations(coord, 600, ["spherex_dr1"], start, end),
+                second_listing,
+            )
+            self.assertEqual(query.call_count, 4)
+
+    def test_only_one_probe_runs_after_outage(self):
+        coord = SkyCoord(120, -85, unit="deg")
+        start = Time("2025-05-01", scale="utc")
+        end = Time("2025-06-01", scale="utc")
+        clock = [100.0]
+        calls = [0]
+        sentinel = object()
+
+        def query(*_args, **_kwargs):
+            calls[0] += 1
+            if calls[0] <= 2:
+                raise RuntimeError("503 Service Unavailable")
+            with self.assertRaises(ArchiveUnavailable):
+                search_observations(coord, 600, ["spherex_dr1"], start, end)
+            return sentinel
+
+        with (
+            patch("archive.monotonic", side_effect=lambda: clock[0]),
+            patch("archive._BoundedIrsa.query_sia", side_effect=query),
+            patch("archive.sleep"),
+        ):
+            with self.assertRaises(ArchiveUnavailable):
+                search_observations(coord, 600, ["spherex_dr1"], start, end)
+            clock[0] += 16
+            self.assertIs(
+                search_observations(coord, 600, ["spherex_dr1"], start, end),
+                sentinel,
+            )
+            self.assertEqual(calls[0], 3)
 
     def test_sia_session_sets_bounded_network_timeout(self):
         session = _TimedSession()

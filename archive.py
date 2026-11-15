@@ -1,4 +1,5 @@
 import re
+from threading import Lock
 from time import monotonic, sleep
 
 from astropy import units as u
@@ -17,6 +18,44 @@ class ArchiveUnavailable(RuntimeError):
 
 ARCHIVE_QUERY_BUDGET_SECONDS = 20
 ARCHIVE_READ_TIMEOUT_SECONDS = 8
+OUTAGE_COOLDOWN_SECONDS = 15
+_outage_lock = Lock()
+_outage_until = 0.0
+_outage_probe = False
+_outage_message = (
+    "IRSA's SPHEREx image search is temporarily unavailable. "
+    "Please try again shortly."
+)
+
+
+def _check_recent_outage():
+    """Permit one probe after a confirmed outage's short cooling period."""
+    global _outage_probe
+    with _outage_lock:
+        if _outage_until:
+            if monotonic() < _outage_until or _outage_probe:
+                raise ArchiveUnavailable(_outage_message)
+            _outage_probe = True
+            return True
+    return False
+
+
+def _record_outage():
+    global _outage_until, _outage_probe
+    with _outage_lock:
+        _outage_until = monotonic() + OUTAGE_COOLDOWN_SECONDS
+        _outage_probe = False
+
+
+def _finish_probe(was_probe):
+    global _outage_until, _outage_probe
+    if was_probe:
+        with _outage_lock:
+            if _outage_probe:
+                # An answer, including an empty listing, proves the archive
+                # can respond. Also release the probe after a distinct error.
+                _outage_until = 0.0
+                _outage_probe = False
 
 
 class _TimedSession(Session):
@@ -58,24 +97,26 @@ def search_observations(
     coord, search_radius_arcsec, collections, start_time, end_time
 ):
     """Find observations overlapping the region and requested UTC interval."""
-    deadline = monotonic() + ARCHIVE_QUERY_BUDGET_SECONDS
-    client = _BoundedIrsa(deadline)
-    for attempt in range(2):
-        try:
-            return client.query_sia(
-                pos=(coord, search_radius_arcsec * u.arcsec),
-                collection=collections,
-                time=(start_time, end_time),
-            )
-        except Exception as error:
-            if not _transient_archive_error(error):
-                raise
-            if attempt == 1 or monotonic() >= deadline:
-                raise ArchiveUnavailable(
-                    "IRSA's SPHEREx image search is temporarily unavailable. "
-                    "Please try again shortly."
-                ) from error
-            sleep(0.5)
+    was_probe = _check_recent_outage()
+    try:
+        deadline = monotonic() + ARCHIVE_QUERY_BUDGET_SECONDS
+        client = _BoundedIrsa(deadline)
+        for attempt in range(2):
+            try:
+                return client.query_sia(
+                    pos=(coord, search_radius_arcsec * u.arcsec),
+                    collection=collections,
+                    time=(start_time, end_time),
+                )
+            except Exception as error:
+                if not _transient_archive_error(error):
+                    raise
+                if attempt == 1 or monotonic() >= deadline:
+                    _record_outage()
+                    raise ArchiveUnavailable(_outage_message) from error
+                sleep(0.5)
+    finally:
+        _finish_probe(was_probe)
 
 
 def load_cutout(

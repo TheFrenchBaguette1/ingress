@@ -418,6 +418,12 @@ def build_sequence(request):
         "Some frames may cover only part of the requested field.",
         "PNG values are for visualization, not photometry.",
     ]
+    if results.meta.get("archive_listing_cached"):
+        limitations.insert(
+            0,
+            "Reused a saved archive observation listing; newly released "
+            "exposures may not appear until the listing refreshes.",
+        )
     if total_candidates > attempted_count:
         limitations.insert(
             0,
