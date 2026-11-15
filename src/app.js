@@ -358,6 +358,7 @@ function readForm(form) {
   const data = new FormData(form);
   const ra = String(data.get('ra') || '').trim();
   const dec = String(data.get('dec') || '').trim();
+  const previousQuery = [state.ra, state.dec, state.from, state.to].join('|');
   const headerForm = form.id === 'header-form';
   if (headerForm) { state.headerRa = ra; state.headerDec = dec; }
   else { state.ra = ra; state.dec = dec; }
@@ -369,6 +370,7 @@ function readForm(form) {
   state.dateError = (state.from && !validDate(state.from) || state.to && !validDate(state.to)) ? 'Enter valid dates.' : '';
   if (!coords.isValid || state.dateError) { render(); (state.raError ? app.querySelector('[name="ra"]') : state.decError ? app.querySelector('[name="dec"]') : null)?.focus(); return; }
   state.ra = ra; state.dec = dec; state.headerRa = null; state.headerDec = null;
+  if ([state.ra, state.dec, state.from, state.to].join('|') !== previousQuery) state.activeDateId = '';
   loadPatch();
 }
 async function showSavedRealExample() {
@@ -481,6 +483,7 @@ function resetHome() {
   state.recovery = null;
   state.sampleFallback = null;
   state.fov = defaultFov(state.source); state.customFov = false;
+  state.band = 4; state.activeDateId = '';
   state.raError = ''; state.decError = ''; state.dateError = ''; state.headerRa = null; state.headerDec = null;
   syncUrl(); render();
 }

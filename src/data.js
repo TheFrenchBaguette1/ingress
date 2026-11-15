@@ -209,7 +209,21 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
   const qualityWarning = 'Instrument quality flags have not yet been applied.';
   if (!warnings.includes(qualityWarning)) warnings.unshift(qualityWarning);
   if (failures) warnings.unshift(`${failures} observation${failures === 1 ? '' : 's'} could not be loaded.`);
-  const frames = manifest.frames.map(frame => {
+  // Older saved sequences can include a sliver of an exposure at the edge of
+  // the patch. A missing target wavelength plus low coverage also indicates
+  // an edge-only cutout whose center may be blank. New builds validate the
+  // center explicitly; keep old snapshots from presenting a black crosshair.
+  const usableFrames = manifest.frames.filter(frame => {
+    const coverage = frame?.coverage_fraction;
+    return typeof coverage !== 'number' ||
+      coverage >= 0.25 && !(coverage < 0.5 && frame.center_wavelength_um == null);
+  });
+  const edgeOnlyCount = manifest.frames.length - usableFrames.length;
+  if (edgeOnlyCount) warnings.unshift(`${edgeOnlyCount} edge-only observation${edgeOnlyCount === 1 ? ' was' : 's were'} omitted because the requested target is not reliably covered.`);
+  if (manifest.status !== 'empty' && !usableFrames.length) {
+    throw new PatchDataError('low_coverage', 'The archive images only clip the edge of this patch. Try a smaller field or another band.');
+  }
+  const frames = usableFrames.map(frame => {
     if (!frame || frame.band !== `D${requestedBand}` ||
         typeof frame.image_url !== 'string' ||
         !(/^\/outputs\/[a-f0-9]{32}\/frame_\d+\.png$/.test(frame.image_url) ||

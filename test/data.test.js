@@ -158,6 +158,21 @@ test('partial archive listing does not falsely say any cutouts failed', () => {
     !flag.label.includes('could not be loaded'))));
 });
 
+test('edge-only cached images cannot masquerade as a useful target sequence', () => {
+  const coords = parseCoordinates(WISE_0855.ra, WISE_0855.dec);
+  const manifest = sequenceManifest('ready');
+  manifest.frames[0].coverage_fraction = 0.04;
+  const patch = normalizeSequencePatch(manifest, coords, 4, {}, 5);
+  assert.equal(patch.frames.length, 1);
+  assert.equal(patch.frames[0].dateId.split('#')[0], '2025-05-07T21:05:00.000Z');
+  assert.ok(patch.warnings.some(warning => warning.includes('edge-only observation')));
+
+  // This older wide-view image has 35% pixels but a blank target crosshair.
+  manifest.frames[1].coverage_fraction = 0.35;
+  assert.throws(() => normalizeSequencePatch(manifest, coords, 4, {}, 5),
+    error => error instanceof PatchDataError && error.code === 'low_coverage');
+});
+
 test('a busy build is retried with the same request, and cancellation stops retries', async () => {
   let calls = 0;
   let waits = 0;

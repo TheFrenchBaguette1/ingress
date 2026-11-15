@@ -15,8 +15,13 @@ test('example loads, date filtering stays inside the range, and errors remain ex
   globalThis.window = { addEventListener() {} };
   const manifest = await readFile(new URL('../public/demo/frames.json', import.meta.url), 'utf8');
   const realFovs = [];
+  const realBands = [];
   globalThis.fetch = async (url, options) => {
-    if (options?.body) realFovs.push(JSON.parse(options.body).fov_arcmin);
+    if (options?.body) {
+      const request = JSON.parse(options.body);
+      realFovs.push(request.fov_arcmin);
+      realBands.push(request.band);
+    }
     return String(url).includes('frames.json')
     ? new Response(manifest, { status: 200 }) : new Response('Unavailable', { status: 503 });
   };
@@ -53,6 +58,24 @@ test('example loads, date filtering stays inside the range, and errors remain ex
   assert.match(app.innerHTML, /Could not load this patch/);
   assert.match(app.innerHTML, /Your search has not been replaced with simulated data/);
   assert.doesNotMatch(app.innerHTML, /SYNTHETIC DEMO — NOT SPHEREx OBSERVATIONS/);
+
+  // Returning to the form hides the band picker; a new real search must use
+  // its visible default rather than the previously selected synthetic band.
+  click('home');
+  click('source-demo');
+  click('source-real');
+  const OriginalFormData = globalThis.FormData;
+  globalThis.FormData = class {
+    get(name) { return { ra: '180', dec: '-30', from: '', to: '' }[name]; }
+  };
+  try {
+    listeners.submit.forEach(listener => listener({ target: { id: 'home-form' }, preventDefault() {} }));
+    await new Promise(resolve => setImmediate(resolve));
+  } finally {
+    globalThis.FormData = OriginalFormData;
+  }
+  assert.deepEqual(realBands, ['D6', 'D4']);
+  assert.equal(globalThis.location.searchParams.get('date'), null);
 });
 
 test('real viewer searches selected detector, offers another band after empty result, and reuses loaded frames', async () => {

@@ -15,6 +15,57 @@ from sequence import SequenceRequest, build_sequence
 
 
 class ParallelCutoutTests(unittest.TestCase):
+    def test_tiny_edge_and_missing_center_are_not_timeline_frames(self):
+        first_mjd = Time("2025-05-03", scale="utc").mjd
+        observations = Table(
+            [[first_mjd, first_mjd + 1], ["SPHEREx-D4"] * 2,
+             ["https://example.org/1.fits", "https://example.org/2.fits"]],
+            names=["t_min", "energy_bandpassname", "access_url"],
+        )
+        request = SequenceRequest(
+            ra_deg=240, dec_deg=0, start_date="2025-05-01",
+            end_date="2025-05-31", fov_arcmin=5, band="D4",
+        )
+
+        def fake_load(observation, coord, size, **kwargs):
+            image_number = int(str(observation["access_url"]).split("/")[-1][0])
+            return {
+                "image": np.full((10, 10), image_number, dtype=float),
+                "wcs": object(), "target_x": 4.5, "target_y": 4.5,
+                "wavelength_um": 3.0, "bandwidth_um": 0.2,
+                "brightness_unit": "MJy/sr", "time_mjd": float(observation["t_min"]),
+                "date_utc": Time(float(observation["t_min"]), format="mjd").iso,
+                "cutout_url": str(observation["access_url"]) + "?cutout",
+            }
+
+        def fake_reproject(source, output_wcs, shape_out, **kwargs):
+            aligned = np.ones(shape_out)
+            footprint = np.zeros(shape_out)
+            if source[0][0, 0] == 1:
+                # A centered 10 × 10 patch is only 4% of a 50 × 50 field.
+                footprint[20:30, 20:30] = 1
+            else:
+                # Almost the entire field is present, but the target is masked.
+                footprint[:] = 1
+                aligned[24:26, 24:26] = np.nan
+            return aligned, footprint
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("sequence.config.OUTPUT_ROOT", Path(temporary)),
+            patch("sequence.cached_search_observations", return_value=observations),
+            patch("sequence.load_cutout", side_effect=fake_load),
+            patch("sequence.reproject_interp", side_effect=fake_reproject),
+        ):
+            manifest = build_sequence(request)
+
+        self.assertEqual(manifest["candidate_count"], 2)
+        self.assertEqual(manifest["frame_count"], 0)
+        self.assertEqual(manifest["status"], "empty")
+        self.assertEqual(len(manifest["failures"]), 2)
+        self.assertIn("Only 4.0%", manifest["failures"][0]["error"])
+        self.assertIn("target center", manifest["failures"][1]["error"])
+
     def test_sampled_archive_result_is_labeled_partial(self):
         observed_mjd = Time("2025-05-03", scale="utc").mjd
         observations = Table(

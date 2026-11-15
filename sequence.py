@@ -281,8 +281,6 @@ def build_sequence(request):
                     if not np.any(valid):
                         raise ValueError("No usable coverage within the output field.")
 
-                    aligned[~valid] = np.nan
-
                     # A partial image may not contain the requested center.
                     height, width = cutout["image"].shape
                     x = cutout["target_x"]
@@ -292,19 +290,38 @@ def build_sequence(request):
                         -0.5 <= x < width - 0.5
                         and -0.5 <= y < height - 0.5
                     )
+                    coverage = float(valid.mean())
+                    if coverage < config.MIN_FRAME_COVERAGE_FRACTION:
+                        raise ValueError(
+                            f"Only {coverage:.1%} of the requested sky patch "
+                            "has valid image pixels."
+                        )
+                    if not center_inside:
+                        raise ValueError("The target lies outside this observation.")
+
+                    # The output grid centers the requested coordinates between
+                    # four pixels for even sizes. All neighboring pixels must be
+                    # valid to show this as an observation of the target.
+                    center_rows = slice((shape[0] - 1) // 2, shape[0] // 2 + 1)
+                    center_cols = slice((shape[1] - 1) // 2, shape[1] // 2 + 1)
+                    if not np.all(valid[center_rows, center_cols]):
+                        raise ValueError(
+                            "The target center has no fully valid aligned image."
+                        )
+
+                    aligned[~valid] = np.nan
 
                     wavelength = None
                     bandwidth = None
 
-                    if center_inside:
-                        wavelength = finite_number(cutout["wavelength_um"])
-                        bandwidth = finite_number(cutout["bandwidth_um"])
+                    wavelength = finite_number(cutout["wavelength_um"])
+                    bandwidth = finite_number(cutout["bandwidth_um"])
 
-                        if wavelength is not None and wavelength <= 0:
-                            wavelength = None
+                    if wavelength is not None and wavelength <= 0:
+                        wavelength = None
 
-                        if bandwidth is not None and bandwidth <= 0:
-                            bandwidth = None
+                    if bandwidth is not None and bandwidth <= 0:
+                        bandwidth = None
 
                     brightness_unit = unit
 
@@ -316,14 +333,14 @@ def build_sequence(request):
                         "detector": detector,
                         "center_wavelength_um": wavelength,
                         "center_bandwidth_um": bandwidth,
-                        "coverage_fraction": float(valid.mean()),
+                        "coverage_fraction": coverage,
                         "source_url": source_url,
                         "cutout_url": cutout["cutout_url"],
                     })
 
                     print(
                         f"  Retained: {cutout['date_utc']} UTC | "
-                        f"coverage {valid.mean():.1%}",
+                        f"coverage {coverage:.1%}",
                         flush=True,
                     )
 
@@ -438,6 +455,8 @@ def build_sequence(request):
         "Instrument quality flags have not yet been applied.",
         "Background and PSF differences have not been corrected.",
         "Some frames may cover only part of the requested field.",
+        f"Frames with less than {config.MIN_FRAME_COVERAGE_FRACTION:.0%} valid "
+        "coverage or no valid target center are excluded.",
         "PNG values are for visualization, not photometry.",
     ]
     if results.meta.get("archive_listing_cached"):
