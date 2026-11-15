@@ -18,8 +18,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from reproject import reproject_interp
 
 import config
-from archive import load_cutout, search_observations
+from archive import ArchiveUnavailable, load_cutout, search_observations
 from archive_cache import cached_search_observations
+from saved_sources import find_saved_sources
 
 
 # ---------- Request validation ----------
@@ -146,13 +147,20 @@ def build_sequence(request):
         )
     else:
         print("Searching the requested sky region...", flush=True)
+        def lookup_with_saved_sources(coord, radius, collections, start, end, *, band):
+            return search_observations(
+                coord, radius, collections, start, end, band=band,
+                known_sources=lambda: find_saved_sources(coord, band, start, end),
+            )
+
         results = cached_search_observations(
             coord,
             search_radius_arcsec,
             config.COLLECTIONS,
             Time(available_start.isoformat(), scale="utc"),
             Time(available_end_exclusive.isoformat(), scale="utc"),
-            fetch=search_observations,
+            fetch=lookup_with_saved_sources,
+            band=request.band,
         )
 
     times = np.asarray(results["t_min"], dtype=float)
@@ -193,6 +201,13 @@ def build_sequence(request):
     )
 
     total_candidates = len(unique_candidates)
+    if not total_candidates and results.meta.get("archive_listing_partial"):
+        # An incomplete date sample cannot establish that the selected
+        # detector has no exposures in the full requested interval.
+        raise ArchiveUnavailable(
+            "The archive answered only part of this date range, with no "
+            "confirmed images for this detector. Try a shorter date range."
+        )
     plan = time_spread_indexes(
         [float(row["t_min"]) for row in unique_candidates],
         min(total_candidates, config.MAX_CUTOUT_ATTEMPTS),
@@ -324,6 +339,13 @@ def build_sequence(request):
 
     frames.sort(key=lambda frame: frame["time_mjd"])
 
+    if not frames and results.meta.get("archive_listing_partial"):
+        raise ArchiveUnavailable(
+            "The archive listing is incomplete, and none of its real image "
+            "cutouts could be loaded at this field width. "
+            "Try a smaller field or a shorter date range."
+        )
+
     # Each request gets its own output folder.
     sequence_id = uuid4().hex
     output_dir = config.OUTPUT_ROOT / sequence_id
@@ -406,7 +428,7 @@ def build_sequence(request):
 
     if not frames:
         status = "empty"
-    elif failures:
+    elif failures or results.meta.get("archive_listing_partial"):
         status = "partial"
     else:
         status = "ready"
@@ -424,6 +446,8 @@ def build_sequence(request):
             "Reused a saved archive observation listing; newly released "
             "exposures may not appear until the listing refreshes.",
         )
+    if results.meta.get("archive_listing_partial"):
+        limitations.insert(0, results.meta["archive_listing_window_note"])
     if total_candidates > attempted_count:
         limitations.insert(
             0,
@@ -435,6 +459,7 @@ def build_sequence(request):
     manifest = {
         "sequence_id": sequence_id,
         "status": status,
+        "archive_listing_partial": bool(results.meta.get("archive_listing_partial")),
         "request": request.model_dump(mode="json"),
         "date_policy": "UTC calendar dates; both selected days included",
         "selection_policy": "time-spread sample of individual exposures from the selected detector",

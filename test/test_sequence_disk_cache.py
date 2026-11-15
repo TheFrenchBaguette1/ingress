@@ -97,6 +97,36 @@ class SequenceDiskCacheTests(unittest.TestCase):
         self.assertIs(second, ready)
         self.assertEqual(build.call_count, 2)
 
+    def test_sampled_archive_frames_do_not_mask_recovered_dates(self):
+        self.manifest["status"] = "partial"
+        self.manifest["archive_listing_partial"] = True
+        self._write_manifest()
+        sampled = {"status": "partial", "archive_listing_partial": True, "frames": []}
+        ready = {"status": "ready", "frames": [{"image_url": "real"}]}
+        with (
+            patch("api.config.OUTPUT_ROOT", self.root),
+            patch("api.build_sequence", side_effect=[sampled, ready]) as build,
+        ):
+            first = create_sequence(self.request)
+            second = create_sequence(self.request)
+        self.assertIs(first, sampled)
+        self.assertIs(second, ready)
+        self.assertEqual(build.call_count, 2)
+
+    def test_partial_cutout_failures_do_not_stick_on_retry(self):
+        self.manifest["status"] = "partial"
+        self.manifest["failures"] = [{"source_url": "https://example.org/b.fits"}]
+        self._write_manifest()
+        partial = {"status": "partial", "failures": self.manifest["failures"]}
+        ready = {"status": "ready", "frames": [{"image_url": "real"}]}
+        with (
+            patch("api.config.OUTPUT_ROOT", self.root),
+            patch("api.build_sequence", side_effect=[partial, ready]) as build,
+        ):
+            self.assertIs(create_sequence(self.request), partial)
+            self.assertIs(create_sequence(self.request), ready)
+        self.assertEqual(build.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

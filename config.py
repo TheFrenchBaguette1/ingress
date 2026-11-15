@@ -4,6 +4,17 @@ from datetime import date
 # ---------- Archive settings ----------
 
 COLLECTIONS = ["spherex_dr1", "spherex_qr3"]
+# SPHEREx Explanatory Supplement v2.1, Table 2. These are detector coverage
+# envelopes, not the wavelength of a particular source pixel. The archive's
+# BAND constraint is an intersection test; verify the detector name locally.
+DETECTOR_RANGES_UM = {
+    "D1": (0.744, 1.116),
+    "D2": (1.099, 1.651),
+    "D3": (1.636, 2.421),
+    "D4": (2.423, 3.822),
+    "D5": (3.809, 4.420),
+    "D6": (4.412, 5.002),
+}
 MISSION_START_DATE = date(2025, 5, 1)
 CACHE_DOWNLOADS = True
 TIMEOUT_SECONDS = 25

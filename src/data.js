@@ -11,6 +11,8 @@ export const WISE_0855 = Object.freeze({
 
 const DEMO_MANIFEST_URL = './public/demo/frames.json';
 const DEMO_FRAMES_URL = './public/demo/frames/';
+const REAL_EXAMPLE_URL = './public/real-example/ra180-dec-30-d4/manifest.json';
+const REAL_EXAMPLE_IMAGE = /^\/public\/real-example\/ra180-dec-30-d4\/frame_\d{3}\.png$/;
 const MISSION_START = '2025-05-01';
 
 const BAND_INFO = [
@@ -174,7 +176,7 @@ function stableSourceKey(url) {
   return hash.toString(16).padStart(16, '0');
 }
 
-export function normalizeSequencePatch(manifest, requestedTarget, requestedBand, queryRange, requestedFov = null) {
+export function normalizeSequencePatch(manifest, requestedTarget, requestedBand, queryRange, requestedFov = null, { bundledExample = false } = {}) {
   if (!manifest || typeof manifest !== 'object' ||
       !['ready', 'partial', 'empty'].includes(manifest.status) ||
       !manifest.request || manifest.request.band !== `D${requestedBand}` ||
@@ -210,14 +212,19 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
   const frames = manifest.frames.map(frame => {
     if (!frame || frame.band !== `D${requestedBand}` ||
         typeof frame.image_url !== 'string' ||
-        !/^\/outputs\/[a-f0-9]{32}\/frame_\d+\.png$/.test(frame.image_url) ||
+        !(/^\/outputs\/[a-f0-9]{32}\/frame_\d+\.png$/.test(frame.image_url) ||
+          bundledExample && REAL_EXAMPLE_IMAGE.test(frame.image_url)) ||
         typeof frame.source_url !== 'string' || !/^https:\/\//.test(frame.source_url)) {
       throw new PatchDataError('invalid_response', 'The backend returned incomplete image metadata.');
     }
     const observedAt = utcObservationTime(frame.date_utc);
     const flags = [{ code: 'quality_unchecked', label: qualityWarning }];
     if (manifest.status === 'partial') {
-      flags.push({ code: 'partial_sequence', label: 'Some observations could not be loaded for this sequence.' });
+      flags.push({ code: 'partial_sequence', label: failures
+        ? 'Some observations could not be loaded for this sequence.'
+        : manifest.archive_listing_partial
+          ? 'The archive returned only part of the requested date range.'
+          : 'This sequence has incomplete date coverage.' });
     }
     const coverage = Number(frame.coverage_fraction);
     if (Number.isFinite(coverage) && coverage >= 0 && coverage < 0.999) {
@@ -253,8 +260,10 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
   const pixelScale = Number(manifest.grid?.pixel_scale_arcsec);
   return {
     source: 'real',
+    bundledRealExample: bundledExample,
     status: manifest.status === 'empty' ? 'empty' : 'ok',
     backendStatus: manifest.status,
+    archiveListingPartial: manifest.archive_listing_partial === true,
     target: { ...requestedTarget, name: requestedTarget.name || 'Your patch' },
     dates,
     bands: BAND_INFO.map(band => ({ ...band })),
@@ -271,6 +280,34 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
     attemptedCount: validCount(manifest.attempted_count),
     skippedCount: validCount(manifest.skipped_count),
   };
+}
+
+// A fixed, clearly identified sample of actual SPHEREx cutouts. This is an
+// offline example for one sky patch, not a replacement for an arbitrary query.
+export async function loadBundledRealPatch({ signal, fetchImpl = fetch } = {}) {
+  let response;
+  try {
+    response = await fetchImpl(REAL_EXAMPLE_URL, { signal });
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error;
+    throw new PatchDataError('example_unavailable', 'Could not open the saved real observations.', error);
+  }
+  if (!response.ok) throw new PatchDataError('example_unavailable', 'Could not open the saved real observations.');
+  let manifest;
+  try { manifest = await response.json(); }
+  catch (error) { throw new PatchDataError('example_unavailable', 'The saved real example is incomplete.', error); }
+  if (manifest?.bundled_real_example !== true || manifest.request?.ra_deg !== 180 ||
+      manifest.request?.dec_deg !== -30 || manifest.request?.fov_arcmin !== 5 ||
+      manifest.request?.band !== 'D4' || manifest.request?.start_date !== '2025-05-01' ||
+      manifest.request?.end_date !== '2026-11-15') {
+    throw new PatchDataError('example_unavailable', 'The saved real example is incomplete.');
+  }
+  try {
+    return normalizeSequencePatch(manifest, parseCoordinates('180', '-30'), 4,
+      { from: '2025-05-01', to: '2026-11-15' }, 5, { bundledExample: true });
+  } catch (error) {
+    throw new PatchDataError('example_unavailable', 'The saved real example is incomplete.', error);
+  }
 }
 
 export async function fetchRealPatch({ ra, dec, fov = 5, from = '', to = '', band = 4, signal, fetchImpl = fetch }) {
@@ -300,7 +337,7 @@ export async function fetchRealPatch({ ra, dec, fov = 5, from = '', to = '', ban
     });
   } catch (error) {
     if (error?.name === 'AbortError') throw error;
-    throw new PatchDataError('unavailable', 'Could not reach the SPHEREx data service. Try again shortly.', error);
+    throw new PatchDataError('backend_unavailable', 'Could not reach the SPHEREx data service. Try again shortly.', error);
   }
   if (!response.ok) {
     let message = '';
@@ -309,7 +346,10 @@ export async function fetchRealPatch({ ra, dec, fov = 5, from = '', to = '', ban
       if (typeof failure?.message === 'string') message = failure.message;
       else if (typeof failure?.detail === 'string') message = failure.detail;
     } catch { /* A proxy can return an HTML error page. */ }
-    throw new PatchDataError(response.status === 409 ? 'busy' : 'unavailable',
+    const code = response.status === 409 ? 'busy'
+      : response.status === 502 && /IRSA|archive|SPHEREx image search/i.test(message) ? 'archive_unavailable'
+      : response.status === 504 ? 'backend_timeout' : 'backend_unavailable';
+    throw new PatchDataError(code,
       message || `The SPHEREx data service returned HTTP ${response.status}.`);
   }
   let payload;

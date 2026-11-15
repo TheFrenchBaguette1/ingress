@@ -1,4 +1,4 @@
-import { WISE_0855, parseCoordinates, fetchRealPatch, loadDemoPatch, retryWhileBusy } from './data.js';
+import { WISE_0855, parseCoordinates, fetchRealPatch, loadBundledRealPatch, loadDemoPatch, retryWhileBusy } from './data.js';
 import { homeStory, heroArt, heroOrnaments } from './story.js';
 
 const app = document.querySelector('#app');
@@ -23,11 +23,14 @@ const state = {
   patch: null, error: null, raError: '', decError: '', dateError: '',
   headerRa: null, headerDec: null,
   playing: false, drawer: '', aboutOpen: false, request: null, imageError: false,
+  recovery: null,
+  sampleFallback: null,
 };
 let playbackTimer = null;
 let loadSequence = 0;
 let restoreDrawerAction = null;
 const realCache = new Map();
+let lastRealView = null;
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -62,6 +65,36 @@ function inRange(dateId) {
 function visibleFrames() { return allBandFrames().filter(f => inRange(f.dateId)); }
 function realCacheKey(coords, band) {
   return [coords.raDeg, coords.decDeg, state.fov, state.from, state.to, band].join('|');
+}
+function realViewSnapshot() {
+  return {
+    patch: state.patch, ra: state.ra, dec: state.dec, from: state.from, to: state.to,
+    fov: state.fov, customFov: state.customFov, band: state.band,
+    activeDateId: state.activeDateId,
+  };
+}
+function sameSkyPosition(first, second) {
+  const a = parseCoordinates(first.ra, first.dec);
+  const b = parseCoordinates(second.ra, second.dec);
+  return a.isValid && b.isValid && Math.abs(a.raDeg - b.raDeg) < 1e-5 &&
+    Math.abs(a.decDeg - b.decDeg) < 1e-5;
+}
+function matchesBundledExample(query) {
+  return sameSkyPosition(query, { ra: '180', dec: '-30' }) &&
+    query.band === 4 && query.fov === 5 &&
+    (query.from || '2025-05-01') === '2025-05-01' &&
+    (query.to || new Date().toISOString().slice(0, 10)) === '2026-11-15';
+}
+function restoreRealView() {
+  if (!lastRealView) return;
+  Object.assign(state, lastRealView);
+  state.source = 'real';
+  state.view = 'viewer';
+  state.error = null;
+  state.headerRa = null;
+  state.headerDec = null;
+  state.imageError = false;
+  settleFrame();
 }
 function rangeNeedsRefresh() {
   const range = state.patch?.queryRange;
@@ -195,7 +228,7 @@ function statusCard(kind) {
   }
   return `<main class="state-main"><div class="state-card" role="alert"><span class="state-icon">⚠</span><h1>Could not load this patch</h1>
     <p>${esc(state.error?.message || 'The data service did not answer. Please try again.')}</p><p>Your search has not been replaced with simulated data.</p>
-    <div class="actions"><button class="primary-button" data-action="retry">Try again</button><button class="pill-button" data-action="home">Change coordinates</button><button class="pill-button" data-action="try-wise">View WISE 0855 demo</button></div>
+    <div class="actions"><button class="primary-button" data-action="retry">Try again</button><button class="pill-button" data-action="home">Change coordinates</button>${state.source === 'real' ? '<button class="pill-button" data-action="saved-real">View saved real observations (5′)</button>' : ''}${lastRealView && state.source === 'real' ? '<button class="pill-button" data-action="return-real">Return to last real view</button>' : ''}<button class="pill-button" data-action="try-wise">View WISE 0855 demo</button></div>
     <details><summary>Technical details</summary><p>${esc(state.error?.code || 'request_failed')}</p></details></div></main>`;
 }
 function imageStage(frame, band, index, frames) {
@@ -296,9 +329,11 @@ function viewer() {
   const frame = currentFrame();
   const synthetic = patch.source === 'synthetic';
   return `<main class="viewer-layout"><div class="viewer-main"><div class="stage">
-    <div class="provenance"><span class="status-badge ${synthetic ? 'synthetic' : 'real'}" data-real-badge>${synthetic ? '⚠ Synthetic demo — not SPHEREx observations' : 'Loading real image…'}</span>
+    <div class="provenance"><span class="status-badge ${synthetic ? 'synthetic' : patch.bundledRealExample ? 'saved-real' : 'real'}" data-real-badge>${synthetic ? '⚠ Synthetic demo — not SPHEREx observations' : patch.bundledRealExample ? 'Saved real SPHEREx observations' : 'Loading real image…'}</span>
     <span class="target-name">${esc(patch.target.name || 'Your patch')} · <span class="mono muted">RA ${esc(state.ra)} · Dec ${esc(state.dec)}</span></span>
-    ${patch.backendStatus === 'partial' ? `<span class="partial-note" role="status">Partial sequence · ${patch.failureCount || 0} exposure${patch.failureCount === 1 ? '' : 's'} could not be loaded</span>` : ''}</div>
+    ${patch.backendStatus === 'partial' ? `<span class="partial-note" role="status">${patch.failureCount ? `Partial sequence · ${patch.failureCount} exposure${patch.failureCount === 1 ? '' : 's'} could not be loaded` : 'Partial date coverage · the archive search was incomplete'}</span>` : ''}</div>
+    ${patch.bundledRealExample ? `<div class="saved-real-banner" role="status"><div><strong>Saved real observations · RA 180°, Dec −30° · Band 4 · 5′</strong><p>${state.sampleFallback ? `${esc(state.sampleFallback.message)} ` : ''}These SPHEREx frames were prepared earlier. They are a fixed snapshot, not a live search or simulated images; newly released observations may be missing.</p></div><button type="button" class="pill-button" data-action="retry">Retry live search</button></div>` : ''}
+    ${state.recovery && !synthetic ? `<div class="recovery-banner" role="status"><div><strong>Showing previously loaded real observations</strong><p>${esc(state.recovery.error.message)} The new search (Band ${state.recovery.attempted.band}, ${state.recovery.attempted.fov}′ wide) did not load. The images below are from your last successful view of this sky position; they are not simulated or new results.</p></div><button type="button" class="pill-button" data-action="retry-failed-query">Retry new search</button></div>` : ''}
     ${frame ? imageStage(frame, band, frames.indexOf(frame), frames) : `<div class="state-card" role="status"><h2>No frames in this range</h2><p>There are no ${esc(rangeLabel(band))} images between the selected dates. Clear dates or pick another wavelength.</p><button class="pill-button" data-action="clear-range">All dates</button></div>`}
     ${timeline(frames, band)}
     <div class="mobile-actions"><button class="soft-button" type="button" data-action="open-bands">Wavelength · ${esc(rangeLabel(band))}</button><button class="soft-button" type="button" data-action="open-details">Details &amp; width</button></div>
@@ -329,7 +364,37 @@ function readForm(form) {
   state.ra = ra; state.dec = dec; state.headerRa = null; state.headerDec = null;
   loadPatch();
 }
-async function loadPatch() {
+async function showSavedRealExample() {
+  state.request?.controller.abort();
+  const controller = new AbortController();
+  const sequence = ++loadSequence;
+  stopPlayback();
+  state.drawer = '';
+  state.source = 'real';
+  state.ra = '180'; state.dec = '-30'; state.band = 4; state.fov = 5;
+  state.from = '2025-05-01'; state.to = '2026-11-15';
+  state.customFov = false; state.activeDateId = '';
+  state.error = null; state.recovery = null; state.sampleFallback = null;
+  state.request = { controller, ra: state.ra, dec: state.dec };
+  state.view = 'loading';
+  syncUrl(); render();
+  try {
+    const patch = await loadBundledRealPatch({ signal: controller.signal });
+    if (sequence !== loadSequence) return;
+    state.patch = patch;
+    state.view = 'viewer';
+    settleFrame();
+    lastRealView = realViewSnapshot();
+  } catch (error) {
+    if (sequence !== loadSequence || error?.name === 'AbortError') return;
+    state.patch = null;
+    state.error = { code: String(error.code || 'example_unavailable'), message: String(error.message || 'Could not open the saved real observations.') };
+    state.view = 'error';
+  } finally {
+    if (sequence === loadSequence) { state.request = null; syncUrl(); render(); }
+  }
+}
+async function loadPatch({ forceRefresh = false } = {}) {
   const coords = parseCoordinates(state.ra, state.dec);
   if (!coords.isValid) { state.raError = coords.raError; state.decError = coords.decError; state.view = 'home'; render(); return; }
   state.raError = ''; state.decError = ''; state.dateError = '';
@@ -341,6 +406,8 @@ async function loadPatch() {
   state.request = { controller, ra: state.ra, dec: state.dec };
   state.view = 'loading';
   state.error = null;
+  state.recovery = null;
+  state.sampleFallback = null;
   syncUrl(); render();
   try {
     // The backend builds one detector sequence. Keep a successful result when revisiting a band.
@@ -348,7 +415,7 @@ async function loadPatch() {
     const cacheKey = realCacheKey(coords, band);
     const patch = state.source === 'synthetic'
       ? await loadDemoPatch({ ra: state.ra, dec: state.dec, signal: controller.signal })
-      : realCache.get(cacheKey) || await retryWhileBusy(
+      : (!forceRefresh && realCache.get(cacheKey)) || await retryWhileBusy(
         () => fetchRealPatch({ ra: state.ra, dec: state.dec, fov: state.fov,
           from: state.from, to: state.to, band, signal: controller.signal }),
         { signal: controller.signal, onBusy: () => {
@@ -357,18 +424,45 @@ async function loadPatch() {
           render();
         } });
     if (sequence !== loadSequence) return;
-    if (state.source === 'real') realCache.set(cacheKey, patch);
+    if (state.source === 'real' && patch.status === 'ok' && patch.backendStatus === 'ready') {
+      realCache.set(cacheKey, patch);
+    }
     state.patch = patch;
     state.view = patch.status === 'empty' ? 'empty' : 'viewer';
     if (patch.status === 'ok') {
       if (!patch.bands.some(b => b.number === state.band)) state.band = patch.bands.find(b => b.number === 4)?.number || patch.bands[0]?.number || 0;
       settleFrame();
+      if (patch.source === 'real') lastRealView = realViewSnapshot();
     }
   } catch (error) {
     if (sequence !== loadSequence || error?.name === 'AbortError') return;
-    state.patch = null;
-    state.error = { code: String(error.code || 'unavailable'), message: String(error.message || 'The data service did not answer.') };
-    state.view = error.code === 'demo_target_unavailable' ? 'empty' : 'error';
+    const failure = { code: String(error.code || 'unavailable'), message: String(error.message || 'The data service did not answer.') };
+    let savedPatch = null;
+    if (state.source === 'real' && failure.code === 'archive_unavailable' && matchesBundledExample(state)) {
+      try { savedPatch = await loadBundledRealPatch({ signal: controller.signal }); }
+      catch { /* The archive error remains the honest result if the saved sample is unavailable. */ }
+    }
+    if (sequence !== loadSequence) return;
+    if (savedPatch) {
+      state.from = '2025-05-01'; state.to = '2026-11-15';
+      state.patch = savedPatch;
+      state.view = 'viewer';
+      state.sampleFallback = failure;
+      settleFrame();
+      lastRealView = realViewSnapshot();
+    } else if (state.source === 'real' && lastRealView && sameSkyPosition(state, lastRealView)) {
+      const attempted = {
+        ra: state.ra, dec: state.dec, from: state.from, to: state.to,
+        band: state.band, fov: state.fov, customFov: state.customFov,
+        activeDateId: state.activeDateId,
+      };
+      restoreRealView();
+      state.recovery = { error: failure, attempted };
+    } else {
+      state.patch = null;
+      state.error = failure;
+      state.view = error.code === 'demo_target_unavailable' ? 'empty' : 'error';
+    }
   } finally {
     if (sequence === loadSequence) { state.request = null; syncUrl(); render(); }
   }
@@ -376,6 +470,8 @@ async function loadPatch() {
 function resetHome() {
   state.request?.controller.abort(); ++loadSequence; stopPlayback();
   state.view = 'home'; state.patch = null; state.drawer = ''; state.request = null;
+  state.recovery = null;
+  state.sampleFallback = null;
   state.fov = defaultFov(state.source); state.customFov = false;
   state.raError = ''; state.decError = ''; state.dateError = ''; state.headerRa = null; state.headerDec = null;
   syncUrl(); render();
@@ -441,7 +537,15 @@ app.addEventListener('click', event => {
   else if (action === 'try-wise') {
     if (!state.customFov && state.fov === defaultFov(state.source)) state.fov = defaultFov('synthetic');
     state.ra = WISE_0855.ra; state.dec = WISE_0855.dec; state.source = 'synthetic'; state.from = ''; state.to = ''; state.band = 4; state.activeDateId = ''; loadPatch();
-  } else if (action === 'retry') loadPatch();
+  } else if (action === 'retry') loadPatch({ forceRefresh: true });
+  else if (action === 'saved-real') showSavedRealExample();
+  else if (action === 'retry-failed-query' && state.recovery) {
+    Object.assign(state, state.recovery.attempted);
+    loadPatch({ forceRefresh: true });
+  }
+  else if (action === 'return-real' && lastRealView) {
+    restoreRealView(); state.recovery = null; syncUrl(); render();
+  }
   else if (action === 'cancel') resetHome();
   else if (action === 'clear-and-retry') { state.from = ''; state.to = ''; loadPatch(); }
   else if (action === 'clear-range') {
@@ -469,7 +573,8 @@ app.addEventListener('toggle', event => {
 app.addEventListener('load', event => {
   if (!event.target.matches?.('[data-frame-image]')) return;
   const badge = app.querySelector('[data-real-badge]');
-  if (state.patch?.source === 'real' && badge) badge.textContent = 'Real SPHEREx observation';
+  if (state.patch?.source === 'real' && badge) badge.textContent =
+    state.patch.bundledRealExample ? 'Saved real SPHEREx observations' : 'Real SPHEREx observation';
 }, true);
 app.addEventListener('error', event => {
   if (!event.target.matches?.('[data-frame-image]')) return;

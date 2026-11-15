@@ -15,6 +15,60 @@ from sequence import SequenceRequest, build_sequence
 
 
 class ParallelCutoutTests(unittest.TestCase):
+    def test_sampled_archive_result_is_labeled_partial(self):
+        observed_mjd = Time("2025-05-03", scale="utc").mjd
+        observations = Table(
+            [[observed_mjd], ["SPHEREx-D3"], ["https://example.org/a.fits"]],
+            names=["t_min", "energy_bandpassname", "access_url"],
+        )
+        observations.meta["archive_listing_partial"] = True
+        observations.meta["archive_listing_window_note"] = "Only one sampled window answered."
+        request = SequenceRequest(
+            ra_deg=180, dec_deg=-30, start_date="2025-05-01",
+            end_date="2026-11-15", fov_arcmin=20, band="D3",
+        )
+
+        def fake_load(*args, **kwargs):
+            self.assertEqual(args[2], 20)
+            return {
+                "image": np.ones((2, 2)), "wcs": object(),
+                "target_x": 0.5, "target_y": 0.5,
+                "wavelength_um": 2.0, "bandwidth_um": 0.1,
+                "brightness_unit": "MJy/sr", "time_mjd": observed_mjd,
+                "date_utc": "2025-05-03 00:00:00",
+                "cutout_url": "https://example.org/a.fits?cutout",
+            }
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("sequence.config.OUTPUT_ROOT", Path(temporary)),
+            patch("sequence.cached_search_observations", return_value=observations),
+            patch("sequence.load_cutout", side_effect=fake_load),
+            patch("sequence.reproject_interp", side_effect=lambda source, grid, shape_out, **kw:
+                  (np.ones(shape_out), np.ones(shape_out))),
+        ):
+            manifest = build_sequence(request)
+        self.assertEqual(manifest["status"], "partial")
+        self.assertTrue(manifest["archive_listing_partial"])
+        self.assertEqual(manifest["frame_count"], 1)
+        self.assertIn("Only one sampled window answered.", manifest["limitations"])
+
+    def test_empty_incomplete_listing_does_not_claim_no_coverage(self):
+        observations = Table(
+            names=["t_min", "energy_bandpassname", "access_url"],
+            dtype=[float, "U20", "U40"],
+        )
+        observations.meta["archive_listing_partial"] = True
+        request = SequenceRequest(
+            ra_deg=180, dec_deg=-30, start_date="2025-05-01",
+            end_date="2026-11-15", fov_arcmin=20, band="D3",
+        )
+        with (
+            patch("sequence.cached_search_observations", return_value=observations),
+            self.assertRaisesRegex(Exception, "no confirmed images"),
+        ):
+            build_sequence(request)
+
     def test_four_parallel_downloads_retain_chronological_output(self):
         first_mjd = Time("2025-05-01", scale="utc").mjd
         observations = Table(

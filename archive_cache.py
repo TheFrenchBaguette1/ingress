@@ -98,7 +98,7 @@ def _write_disk_listing(key, results):
 
 
 def cached_search_observations(
-    coord, search_radius_arcsec, collections, start_time, end_time, fetch
+    coord, search_radius_arcsec, collections, start_time, end_time, fetch, *, band=None
 ):
     """Return a private copy of an exact sky/UTC query's observation table.
 
@@ -109,17 +109,25 @@ def cached_search_observations(
     key = (
         float(coord.ra.deg), float(coord.dec.deg),
         float(search_radius_arcsec), tuple(collections),
-        start_time.isot, end_time.isot,
+        start_time.isot, end_time.isot, band,
     )
+    # Earlier versions saved unfiltered all-detector listings under the same
+    # six-part key without `band`. These are still valid for any detector and
+    # particularly useful during an archive outage.
+    legacy_key = key[:-1] if band is not None else None
     with _lock:
         cached = _listings.get(key)
+        if cached is None and legacy_key is not None:
+            cached = _listings.get(legacy_key)
         if cached is not None:
-            _listings.move_to_end(key)
+            _listings.move_to_end(key if key in _listings else legacy_key)
             reused = cached.copy(copy_data=True)
             reused.meta["archive_listing_cached"] = True
             return reused
 
     saved = _read_disk_listing(key)
+    if saved is None and legacy_key is not None:
+        saved = _read_disk_listing(legacy_key)
     if saved is not None:
         with _lock:
             _listings[key] = saved.copy(copy_data=True)
@@ -128,8 +136,12 @@ def cached_search_observations(
                 _listings.popitem(last=False)
         return saved.copy(copy_data=True)
 
-    results = fetch(coord, search_radius_arcsec, collections, start_time, end_time)
-    if isinstance(results, Table) and 0 < len(results) <= MAX_CACHED_ROWS:
+    args = (coord, search_radius_arcsec, collections, start_time, end_time)
+    results = fetch(*args, band=band) if band is not None else fetch(*args)
+    # A sampled fallback is useful for this request, but caching it as a full
+    # listing could hide later observations after IRSA recovers.
+    if (isinstance(results, Table) and 0 < len(results) <= MAX_CACHED_ROWS
+            and not results.meta.get("archive_listing_partial")):
         with _lock:
             _listings[key] = results.copy(copy_data=True)
             _listings.move_to_end(key)

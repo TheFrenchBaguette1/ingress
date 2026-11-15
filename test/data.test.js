@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { parseCoordinates, loadDemoPatch, fetchRealPatch, normalizeSequencePatch, PatchDataError, WISE_0855, retryWhileBusy } from '../src/data.js';
+import { parseCoordinates, loadBundledRealPatch, loadDemoPatch, fetchRealPatch, normalizeSequencePatch, PatchDataError, WISE_0855, retryWhileBusy } from '../src/data.js';
 
 test('sexagesimal and decimal coordinates agree, with bad values rejected', () => {
   const sexagesimal = parseCoordinates(WISE_0855.ra, WISE_0855.dec);
@@ -26,6 +26,28 @@ test('synthetic WISE example is locally sourced and target limited', async () =>
   assert.ok(patch.frames.every(f => f.imageUrl.startsWith('./public/demo/frames/')));
   await assert.rejects(loadDemoPatch({ ra: '110', dec: '12', fetchImpl }),
     error => error instanceof PatchDataError && error.code === 'demo_target_unavailable');
+});
+
+test('saved real example preserves fixed sky, band, dates, and actual source links', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../public/real-example/ra180-dec-30-d4/manifest.json', import.meta.url), 'utf8'));
+  const fetchImpl = async url => {
+    assert.equal(url, './public/real-example/ra180-dec-30-d4/manifest.json');
+    return new Response(JSON.stringify(manifest), { status: 200 });
+  };
+  const patch = await loadBundledRealPatch({ fetchImpl });
+  assert.equal(patch.source, 'real');
+  assert.equal(patch.bundledRealExample, true);
+  assert.equal(patch.frames.length, 8);
+  assert.deepEqual(patch.queryRange, { from: '2025-05-01', to: '2026-11-15' });
+  assert.ok(patch.frames.every(frame => frame.band === 4 &&
+    frame.imageUrl.startsWith('/public/real-example/ra180-dec-30-d4/') &&
+    frame.archiveUrl.startsWith('https://irsa.ipac.caltech.edu/')));
+
+  const unsafe = structuredClone(manifest);
+  unsafe.frames[0].image_url = '/public/demo/frames/b4_2025-05-07.png';
+  await assert.rejects(loadBundledRealPatch({ fetchImpl: async () =>
+    new Response(JSON.stringify(unsafe), { status: 200 }) }),
+  error => error.code === 'example_unavailable');
 });
 
 function sequenceManifest(status = 'partial', requestOverride = {}) {
@@ -104,6 +126,36 @@ test('archive empty, failed, and busy states remain distinct', async () => {
   const fetchImpl = async () => new Response(JSON.stringify({ detail: 'A sequence is already being built.' }), { status: 409 });
   await assert.rejects(fetchRealPatch({ ra: WISE_0855.ra, dec: WISE_0855.dec, fetchImpl }),
     error => error.code === 'busy' && error.message.includes('already being built'));
+});
+
+test('archive outage and disconnected backend have distinct failure codes', async () => {
+  const input = { ra: '180', dec: '-30' };
+  await assert.rejects(fetchRealPatch({ ...input, fetchImpl: async () =>
+    new Response(JSON.stringify({ detail: "IRSA's SPHEREx image search is temporarily unavailable." }), { status: 502 }) }),
+  error => error.code === 'archive_unavailable');
+  await assert.rejects(fetchRealPatch({ ...input, fetchImpl: async () =>
+    new Response(JSON.stringify({ detail: 'The SPHEREx image search did not respond in time for this patch.' }), { status: 502 }) }),
+  error => error.code === 'archive_unavailable');
+  await assert.rejects(fetchRealPatch({ ...input, fetchImpl: async () =>
+    new Response(JSON.stringify({ message: 'The real-data backend is not connected yet.' }), { status: 503 }) }),
+  error => error.code === 'backend_unavailable');
+  await assert.rejects(fetchRealPatch({ ...input, fetchImpl: async () => { throw new TypeError('network'); } }),
+  error => error.code === 'backend_unavailable');
+});
+
+test('partial archive listing does not falsely say any cutouts failed', () => {
+  const manifest = sequenceManifest('partial');
+  manifest.failures = [];
+  manifest.archive_listing_partial = true;
+  const patch = normalizeSequencePatch(manifest,
+    parseCoordinates(WISE_0855.ra, WISE_0855.dec), 4,
+    { from: '2025-05-01', to: new Date().toISOString().slice(0, 10) }, 5);
+  assert.equal(patch.failureCount, 0);
+  assert.equal(patch.archiveListingPartial, true);
+  assert.ok(patch.frames.every(frame => frame.flags.some(flag =>
+    flag.code === 'partial_sequence' && flag.label.includes('only part of the requested date range'))));
+  assert.ok(patch.frames.every(frame => frame.flags.every(flag =>
+    !flag.label.includes('could not be loaded'))));
 });
 
 test('a busy build is retried with the same request, and cancellation stops retries', async () => {

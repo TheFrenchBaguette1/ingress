@@ -1,0 +1,158 @@
+{
+  "sequence_id": "33eea3041b184cf6b014b0a6d4d906f7",
+  "status": "partial",
+  "request": {
+    "ra_deg": 180.0,
+    "dec_deg": -30.0,
+    "start_date": "2024-06-20",
+    "end_date": "2026-10-15",
+    "fov_arcmin": 5.0,
+    "band": "D3"
+  },
+  "date_policy": "UTC calendar dates; both selected days included",
+  "selection_policy": "time-spread sample of individual exposures from the selected detector",
+  "candidate_count": 63,
+  "attempted_count": 12,
+  "skipped_count": 51,
+  "frame_count": 6,
+  "can_animate": true,
+  "grid": {
+    "width_pixels": 50,
+    "height_pixels": 50,
+    "pixel_scale_arcsec": 6.0,
+    "orientation": "north up, east left",
+    "wcs_header": "WCSAXES =                    2 / Number of coordinate axes                      \nCRPIX1  =                 25.5 / Pixel coordinate of reference point            \nCRPIX2  =                 25.5 / Pixel coordinate of reference point            \nCDELT1  =  -0.0016666666666667 / [deg] Coordinate increment at reference point  \nCDELT2  =   0.0016666666666667 / [deg] Coordinate increment at reference point  \nCUNIT1  = 'deg'                / Units of coordinate increment and value        \nCUNIT2  = 'deg'                / Units of coordinate increment and value        \nCTYPE1  = 'RA---TAN'           / Right ascension, gnomonic projection           \nCTYPE2  = 'DEC--TAN'           / Declination, gnomonic projection               \nCRVAL1  =                180.0 / [deg] Coordinate value at reference point      \nCRVAL2  =                -30.0 / [deg] Coordinate value at reference point      \nLONPOLE =                180.0 / [deg] Native longitude of celestial pole       \nLATPOLE =                -30.0 / [deg] Native latitude of celestial pole        \nMJDREF  =                  0.0 / [d] MJD of fiducial time                       \nRADESYS = 'ICRS'               / Equatorial coordinate system                   "
+  },
+  "display": {
+    "brightness_unit": "MJy / sr",
+    "vmin": 0.13900722533464432,
+    "vmax": 3.7890322637558094,
+    "stretch": "asinh",
+    "stretch_a": 0.1,
+    "missing_pixels": "transparent"
+  },
+  "frames": [
+    {
+      "date_utc": "2025-07-04 08:22:35.760",
+      "time_mjd": 60860.349025,
+      "band": "D3",
+      "detector": "SPHEREx-D3",
+      "center_wavelength_um": 2.3853308500065404,
+      "center_bandwidth_um": 0.058875723138282224,
+      "coverage_fraction": 0.8544,
+      "source_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2025W27_2A/l2b-v27-2026-215/3/level2_2025W27_2A_0196_1D3_spx_l2b-v27-2026-215.fits",
+      "cutout_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2025W27_2A/l2b-v27-2026-215/3/level2_2025W27_2A_0196_1D3_spx_l2b-v27-2026-215.fits?center=180.0,-30.0d&size=0.08333333333333333",
+      "index": 0,
+      "image_url": "/public/real-example/ra180-dec-30-d3/frame_000.png",
+      "elapsed_days": 0.0
+    },
+    {
+      "date_utc": "2025-07-05 08:50:03.235",
+      "time_mjd": 60861.368093,
+      "band": "D3",
+      "detector": "SPHEREx-D3",
+      "center_wavelength_um": null,
+      "center_bandwidth_um": null,
+      "coverage_fraction": 0.0292,
+      "source_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2025W27_2A/l2b-v27-2026-215/3/level2_2025W27_2A_0430_1D3_spx_l2b-v27-2026-215.fits",
+      "cutout_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2025W27_2A/l2b-v27-2026-215/3/level2_2025W27_2A_0430_1D3_spx_l2b-v27-2026-215.fits?center=180.0,-30.0d&size=0.08333333333333333",
+      "index": 1,
+      "image_url": "/public/real-example/ra180-dec-30-d3/frame_001.png",
+      "elapsed_days": 1.0190679999941494
+    },
+    {
+      "date_utc": "2026-01-02 16:00:05.645",
+      "time_mjd": 61042.666732,
+      "band": "D3",
+      "detector": "SPHEREx-D3",
+      "center_wavelength_um": 1.7206104145706675,
+      "center_bandwidth_um": 0.041372212491555184,
+      "coverage_fraction": 0.852,
+      "source_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2026W01_2A/l2b-v27-2026-212/3/level2_2026W01_2A_0242_3D3_spx_l2b-v27-2026-212.fits",
+      "cutout_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2026W01_2A/l2b-v27-2026-212/3/level2_2026W01_2A_0242_3D3_spx_l2b-v27-2026-212.fits?center=180.0,-30.0d&size=0.08333333333333333",
+      "index": 2,
+      "image_url": "/public/real-example/ra180-dec-30-d3/frame_002.png",
+      "elapsed_days": 182.3177069999947
+    },
+    {
+      "date_utc": "2026-01-03 01:41:09.082",
+      "time_mjd": 61043.070244,
+      "band": "D3",
+      "detector": "SPHEREx-D3",
+      "center_wavelength_um": 1.974952856046188,
+      "center_bandwidth_um": 0.0476121992093968,
+      "coverage_fraction": 0.8496,
+      "source_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2026W01_2A/l2b-v27-2026-212/3/level2_2026W01_2A_0324_1D3_spx_l2b-v27-2026-212.fits",
+      "cutout_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2026W01_2A/l2b-v27-2026-212/3/level2_2026W01_2A_0324_1D3_spx_l2b-v27-2026-212.fits?center=180.0,-30.0d&size=0.08333333333333333",
+      "index": 3,
+      "image_url": "/public/real-example/ra180-dec-30-d3/frame_003.png",
+      "elapsed_days": 182.7212189999991
+    },
+    {
+      "date_utc": "2026-06-09 14:58:40.426",
+      "time_mjd": 61200.624079,
+      "band": "D3",
+      "detector": "SPHEREx-D3",
+      "center_wavelength_um": 1.950072520614157,
+      "center_bandwidth_um": 0.04789713460618369,
+      "coverage_fraction": 0.8596,
+      "source_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/qr3/level2/2026W24_1A/l2b-v27-2026-271/3/level2_2026W24_1A_0367_4D3_spx_l2b-v27-2026-271.fits",
+      "cutout_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/qr3/level2/2026W24_1A/l2b-v27-2026-271/3/level2_2026W24_1A_0367_4D3_spx_l2b-v27-2026-271.fits?center=180.0,-30.0d&size=0.08333333333333333",
+      "index": 4,
+      "image_url": "/public/real-example/ra180-dec-30-d3/frame_004.png",
+      "elapsed_days": 340.2750539999979
+    },
+    {
+      "date_utc": "2026-06-21 00:39:59.155",
+      "time_mjd": 61212.027768,
+      "band": "D3",
+      "detector": "SPHEREx-D3",
+      "center_wavelength_um": 1.9952686744811485,
+      "center_bandwidth_um": 0.049220005670563505,
+      "coverage_fraction": 0.8584,
+      "source_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/qr3/level2/2026W25_2A/l2b-v27-2026-273/3/level2_2026W25_2A_0550_1D3_spx_l2b-v27-2026-273.fits",
+      "cutout_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/qr3/level2/2026W25_2A/l2b-v27-2026-273/3/level2_2026W25_2A_0550_1D3_spx_l2b-v27-2026-273.fits?center=180.0,-30.0d&size=0.08333333333333333",
+      "index": 5,
+      "image_url": "/public/real-example/ra180-dec-30-d3/frame_005.png",
+      "elapsed_days": 351.67874299999676
+    }
+  ],
+  "failures": [
+    {
+      "source_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2025W20_2D/l2b-v27-2026-198/3/level2_2025W20_2D_0324_1D3_spx_l2b-v27-2026-198.fits",
+      "error": "HTTPError: HTTP Error 503: Service Unavailable"
+    },
+    {
+      "source_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2026W01_2A/l2b-v27-2026-212/3/level2_2026W01_2A_0105_1D3_spx_l2b-v27-2026-212.fits",
+      "error": "HTTPError: HTTP Error 503: Service Unavailable"
+    },
+    {
+      "source_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/qr3/level2/2026W21_1A/l2b-v27-2026-268/3/level2_2026W21_1A_0248_1D3_spx_l2b-v27-2026-268.fits",
+      "error": "HTTPError: HTTP Error 503: Service Unavailable"
+    },
+    {
+      "source_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/qr3/level2/2026W28_1A/l2b-v27-2026-275/3/level2_2026W28_1A_0078_1D3_spx_l2b-v27-2026-275.fits",
+      "error": "HTTPError: HTTP Error 503: Service Unavailable"
+    },
+    {
+      "source_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2025W24_2D/l2b-v27-2026-202/3/level2_2025W24_2D_0321_1D3_spx_l2b-v27-2026-202.fits",
+      "error": "HTTPError: HTTP Error 503: Service Unavailable"
+    },
+    {
+      "source_url": "https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/2025W21_2C/l2b-v27-2026-199/3/level2_2025W21_2C_0291_4D3_spx_l2b-v27-2026-199.fits",
+      "error": "HTTPError: HTTP Error 503: Service Unavailable"
+    }
+  ],
+  "manifest_url": "/outputs/33eea3041b184cf6b014b0a6d4d906f7/manifest.json",
+  "limitations": [
+    "Bundled snapshot of verified real SPHEREx observations at RA 180\u00b0, Dec -30\u00b0, 5 arcmin, Band D3. Partial original sequence; this is not a live search.",
+    "Time-spread sample: attempted 12 of 63 available exposures; some dates were skipped to keep the search responsive.",
+    "Reused a saved archive observation listing; newly released exposures may not appear until the listing refreshes.",
+    "The wavelength at a sky position can differ between exposures.",
+    "Instrument quality flags have not yet been applied.",
+    "Background and PSF differences have not been corrected.",
+    "Some frames may cover only part of the requested field.",
+    "PNG values are for visualization, not photometry."
+  ],
+  "bundled_real_example": true
+}

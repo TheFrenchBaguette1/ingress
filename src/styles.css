@@ -83,8 +83,16 @@ h1, h2, h3, p { margin-top: 0; }
 .status-badge { display: inline-flex; align-items: center; gap: 7px; padding: 5px 10px; font-size: .8rem; font-weight: 600; border-radius: 5px; }
 .status-badge.synthetic { background: #f1b946; color: #171308; }
 .status-badge.real { background: #d7e2ef; color: #101820; }
+.status-badge.saved-real { background: #b9dcf4; color: #10283c; }
 .target-name { font-size: .85rem; }
 .partial-note { color: #f2bd78; font-size: .75rem; }
+.recovery-banner, .saved-real-banner { display: flex; justify-content: space-between; align-items: center; gap: 15px; margin: 2px 0 18px; padding: 14px 16px; border: 1px solid #9d7529; border-radius: 10px; background: #221c10; color: #f4d48a; }
+.saved-real-banner { border-color: #4b7690; background: #12202a; color: #b9dcf4; }
+.recovery-banner strong, .saved-real-banner strong { font-size: .88rem; }
+.recovery-banner p, .saved-real-banner p { margin: 5px 0 0; color: #d6c8ac; line-height: 1.45; font-size: .8rem; }
+.saved-real-banner p { color: #bad0dc; }
+.recovery-banner .pill-button, .saved-real-banner .pill-button { flex: none; }
+@media (max-width: 600px) { .recovery-banner, .saved-real-banner { flex-direction: column; align-items: stretch; } }
 .stage-top { display: flex; align-items: end; justify-content: space-between; gap: 10px; margin-bottom: 13px; }
 .frame-date { font: 400 clamp(2rem,3vw,2.75rem) 'Instrument Serif',Georgia,serif; line-height: 1; }
 .frame-ordinal { color: #aeb6c2; margin-left: 12px; font-size: .88rem; white-space: nowrap; }

@@ -129,6 +129,13 @@ test('real viewer searches selected detector, offers another band after empty re
   assert.deepEqual(requestedBands, ['D4', 'D4', 'D2']);
   assert.match(app.innerHTML, /\/outputs\/b{32}\/frame_000\.png/);
 
+  listeners.click.forEach(listener => listener({ target: {
+    closest: () => ({ dataset: { action: 'retry' }, tagName: 'BUTTON' }),
+    matches: () => false,
+  } }));
+  await flush();
+  assert.deepEqual(requestedBands, ['D4', 'D4', 'D2', 'D4']);
+
   globalThis.location = new URL(`${base}&fov=5`);
   windowListeners.popstate.forEach(listener => listener());
   await flush();

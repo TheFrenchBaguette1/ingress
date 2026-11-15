@@ -38,9 +38,9 @@ MAX_CACHED_SEQUENCES = 32
 
 
 def remember_sequence(key, result):
-    # Empty can mean that the current archive query or all cutouts failed.
-    # A later retry may succeed, or newly released frames may appear.
-    if result.get("status") not in ("ready", "partial"):
+    # Empty and partial can reflect a transient archive/cutout failure. Only
+    # complete, unfiltered builds are stable enough for an exact-result cache.
+    if result.get("status") != "ready" or result.get("archive_listing_partial"):
         return
     with cache_lock:
         sequence_cache[key] = result

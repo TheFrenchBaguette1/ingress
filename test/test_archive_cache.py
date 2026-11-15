@@ -10,7 +10,7 @@ from astropy.coordinates import SkyCoord
 from astropy.table import Table
 from astropy.time import Time
 
-from archive_cache import cached_search_observations, clear_archive_cache
+from archive_cache import _write_disk_listing, cached_search_observations, clear_archive_cache
 from sequence import SequenceRequest, build_sequence
 
 
@@ -25,6 +25,53 @@ class ArchiveCacheTests(unittest.TestCase):
 
     def tearDown(self):
         clear_archive_cache()
+
+    def test_detector_filter_has_distinct_cache_key(self):
+        coord = SkyCoord(180, -30, unit="deg")
+        start, end = Time("2025-05-01"), Time("2025-06-01")
+        listing = Table(
+            [[Time("2025-05-03").mjd], ["SPHEREx-D3"], ["https://example.org/a.fits"]],
+            names=["t_min", "energy_bandpassname", "access_url"],
+        )
+        fetch = Mock(return_value=listing)
+        cached_search_observations(coord, 850, ["dr1"], start, end, fetch, band="D3")
+        cached_search_observations(coord, 850, ["dr1"], start, end, fetch, band="D3")
+        cached_search_observations(coord, 850, ["dr1"], start, end, fetch, band="D4")
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(fetch.call_args.kwargs["band"], "D4")
+
+    def test_incomplete_listing_is_never_cached_as_full_coverage(self):
+        coord = SkyCoord(180, -30, unit="deg")
+        start, end = Time("2025-05-01"), Time("2026-11-15")
+        listing = Table(
+            [[Time("2025-05-03").mjd], ["SPHEREx-D3"], ["https://example.org/a.fits"]],
+            names=["t_min", "energy_bandpassname", "access_url"],
+        )
+        listing.meta["archive_listing_partial"] = True
+        listing.meta["archive_listing_window_note"] = "Only one sampled date window answered."
+        fetch = Mock(return_value=listing)
+        for _ in range(2):
+            result = cached_search_observations(
+                coord, 850, ["dr1"], start, end, fetch, band="D3"
+            )
+            self.assertTrue(result.meta["archive_listing_partial"])
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_old_unfiltered_listing_remains_usable_during_outage(self):
+        coord = SkyCoord(180, -30, unit="deg")
+        start, end = Time("2025-05-01"), Time("2025-06-01")
+        listing = Table(
+            [[Time("2025-05-03").mjd], ["SPHEREx-D3"], ["https://example.org/a.fits"]],
+            names=["t_min", "energy_bandpassname", "access_url"],
+        )
+        old_key = (180.0, -30.0, 850.0, ("dr1",), start.isot, end.isot)
+        _write_disk_listing(old_key, listing)
+        result = cached_search_observations(
+            coord, 850, ["dr1"], start, end,
+            Mock(side_effect=RuntimeError("archive down")), band="D3",
+        )
+        self.assertTrue(result.meta["archive_listing_cached"])
+        self.assertEqual(len(result), 1)
 
     def test_reuses_identical_listing_and_defends_against_mutations(self):
         coord = SkyCoord(120, -85, unit="deg")

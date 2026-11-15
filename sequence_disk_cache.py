@@ -38,7 +38,8 @@ def find_saved_sequence(request, output_root):
             if (
                 manifest.get("request") != expected_request
                 or manifest.get("sequence_id") != sequence_id
-                or manifest.get("status") not in ("ready", "partial")
+                or manifest.get("status") != "ready"
+                or manifest.get("archive_listing_partial")
                 or not isinstance(frames, list)
                 or not frames
                 or manifest.get("frame_count") != len(frames)
