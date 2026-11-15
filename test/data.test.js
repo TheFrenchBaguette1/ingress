@@ -35,6 +35,7 @@ function sequenceManifest(status = 'partial', requestOverride = {}) {
       fov_arcmin: 5, start_date: '2025-05-01', end_date: new Date().toISOString().slice(0, 10),
       ...requestOverride },
     grid: { width_pixels: 50, pixel_scale_arcsec: 6, orientation: 'north up, east left' },
+    candidate_count: 102, attempted_count: 3, skipped_count: 99,
     limitations: ['Instrument quality flags have not yet been applied.', 'PNG values are for visualization, not photometry.'],
     failures: status === 'partial' ? [{ error: 'archive timeout' }] : [],
     frames: status === 'empty' ? [] : [
@@ -55,7 +56,7 @@ test('real adapter posts a single detector and maps backend frames without losin
     body = JSON.parse(options.body);
     return new Response(JSON.stringify(sequenceManifest()), { status: 200 });
   };
-  const patch = await fetchRealPatch({ ra: WISE_0855.ra, dec: WISE_0855.dec, fov: 5, band: 4, fetchImpl });
+  const patch = await fetchRealPatch({ ra: WISE_0855.ra, dec: WISE_0855.dec, band: 4, fetchImpl });
   assert.equal(requested, '/api/sequence');
   assert.ok(Math.abs(body.ra_deg - WISE_0855.raDeg) < 1e-6);
   assert.equal(body.fov_arcmin, 5);
@@ -67,6 +68,13 @@ test('real adapter posts a single detector and maps backend frames without losin
   assert.equal(patch.status, 'ok');
   assert.equal(patch.backendStatus, 'partial');
   assert.equal(patch.bands.length, 6);
+  assert.deepEqual(patch.bands.map(band => band.rangeUm), [
+    [0.744, 1.116], [1.099, 1.651], [1.636, 2.421],
+    [2.423, 3.822], [3.809, 4.420], [4.412, 5.002],
+  ]);
+  assert.equal(patch.candidateCount, 102);
+  assert.equal(patch.attemptedCount, 3);
+  assert.equal(patch.skippedCount, 99);
   assert.equal(patch.frames.length, 2);
   assert.notEqual(patch.frames[0].dateId, patch.frames[1].dateId);
   const changedOrder = sequenceManifest();
@@ -125,4 +133,16 @@ test('a busy build is retried with the same request, and cancellation stops retr
   }, { signal: controller.signal, onBusy: () => controller.abort() }),
   error => error.name === 'AbortError');
   assert.equal(cancelledCalls, 1);
+});
+
+test('busy retries stop after 30 five-second waits by default', async () => {
+  let calls = 0;
+  let waits = 0;
+  await assert.rejects(retryWhileBusy(async () => {
+    calls++;
+    throw new PatchDataError('busy', 'Already building');
+  }, { wait: async () => { waits++; } }),
+  error => error.code === 'busy_timeout');
+  assert.equal(calls, 31);
+  assert.equal(waits, 30);
 });

@@ -3,13 +3,21 @@ import { homeStory, heroArt, heroOrnaments } from './story.js';
 
 const app = document.querySelector('#app');
 const params = new URLSearchParams(location.search);
-const initialFov = Number(params.get('fov'));
+const defaultFov = source => source === 'synthetic' ? 10 : 5;
+function fovFromQuery(query, source) {
+  const value = Number(query.get('fov'));
+  if (Number.isInteger(value) && value >= 3 && value <= 20) return value;
+  // Earlier shared coordinate links omitted fov and displayed a 10′ field.
+  return query.get('ra') && query.get('dec') ? 10 : defaultFov(source);
+}
+const initialSource = params.get('source') === 'demo' ? 'synthetic' : 'real';
+const initialFov = fovFromQuery(params, initialSource);
 const state = {
-  view: 'home', source: params.get('source') === 'demo' ? 'synthetic' : 'real',
+  view: 'home', source: initialSource,
   ra: params.get('ra') || '', dec: params.get('dec') || '',
   from: validDate(params.get('from')) ? params.get('from') : '',
   to: validDate(params.get('to')) ? params.get('to') : '',
-  fov: Number.isInteger(initialFov) && initialFov >= 3 && initialFov <= 20 ? initialFov : 10,
+  fov: initialFov,
   customFov: ![5, 10, 20].includes(initialFov) && initialFov >= 3 && initialFov <= 20,
   band: Number(params.get('band')) || 4, activeDateId: params.get('date') || '',
   patch: null, error: null, raError: '', decError: '', dateError: '',
@@ -29,7 +37,7 @@ function validDate(value) {
   const parsed = new Date(`${value}T00:00:00Z`);
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
-function rangeLabel(band) { return band?.rangeUm?.map(n => Number(n).toFixed(2)).join('–') + ' µm'; }
+function rangeLabel(band) { return band?.rangeUm?.map(n => Number(n).toFixed(band.approximateRange ? 2 : 3)).join('–') + ' µm'; }
 function displayDate(iso) {
   const date = new Date(`${String(iso).slice(0, 10)}T12:00:00Z`);
   return Number.isNaN(date.getTime()) ? String(iso).slice(0, 10) :
@@ -105,7 +113,7 @@ function syncUrl() {
     if (state.source === 'synthetic') url.searchParams.set('source', 'demo');
     if (state.band) url.searchParams.set('band', String(state.band));
     if (state.activeDateId) url.searchParams.set('date', state.activeDateId);
-    if (state.fov !== 10) url.searchParams.set('fov', String(state.fov));
+    url.searchParams.set('fov', String(state.fov));
     if (state.from) url.searchParams.set('from', state.from);
     if (state.to) url.searchParams.set('to', state.to);
   }
@@ -201,7 +209,7 @@ function imageStage(frame, band, index, frames) {
   const variable = synthetic && Array.isArray(frame.variablePct) ? `<div class="demo-marker variable" style="left:${Number(frame.variablePct[0])}%;top:${Number(frame.variablePct[1])}%"><span>Simulated variable source</span></div>` : '';
   const coverageNote = frame.flags?.find(flag => flag.code === 'partial_coverage');
   return `<div class="stage-top"><div><span class="frame-date">${esc(displayDate(frame.dateId))}</span><span class="frame-ordinal">Frame ${index + 1} of ${frames.length} · ${esc(date?.timeUtc || '')} UTC</span></div>
-    <span class="wavelength-chip" style="--band-color:${bandColor(band)}"><i class="color-chip"></i>${frame.wavelengthUm == null ? 'Wavelength unavailable' : esc(Number(frame.wavelengthUm).toFixed(2)) + ' µm at target'} · Band ${band.number}</span></div>
+    <span class="wavelength-chip" style="--band-color:${bandColor(band)}"><i class="color-chip"></i>${frame.wavelengthUm == null ? 'Wavelength unavailable' : '≈' + esc(Number(frame.wavelengthUm).toFixed(2)) + ' µm at target'} · Band ${band.number}</span></div>
     <div class="image-view ${synthetic ? 'demo' : ''}" aria-label="${synthetic ? 'Synthetic illustration' : 'SPHEREx observation'} at ${esc(displayDate(frame.dateId))}">
       <div class="image-layer" style="--zoom:${zoom}"><img data-frame-image src="${esc(frame.imageUrl)}" alt="${synthetic ? 'Synthetic sky patch illustration' : 'SPHEREx sky patch image'}, band ${band.number}, ${esc(displayDate(frame.dateId))}" />${mover}${variable}<div class="crosshair" title="Entered coordinates"></div></div>
       ${synthetic ? '<div class="image-watermark">SYNTHETIC DEMO — NOT SPHEREx OBSERVATIONS</div>' : ''}
@@ -210,12 +218,24 @@ function imageStage(frame, band, index, frames) {
     </div><div class="image-caption"><span>Crosshair marks the entered coordinates${pixelScale ? ` · 1 pixel ≈ ${esc(pixelScale)}″ of sky` : ''}</span><a href="#frame-details-desktop" data-action="show-details">Source and details</a></div>
     ${coverageNote ? `<p class="coverage-note">${esc(coverageNote.label)} Missing pixels are dark.</p>` : ''}`;
 }
+function wavelengthComparisonNote(frames, source) {
+  if (source !== 'real' || frames.length < 2) return '';
+  const wavelengths = frames.map(frame => frame.wavelengthUm).filter(value => Number.isFinite(value) && value > 0);
+  if (wavelengths.length < 2) return '';
+  const first = Math.min(...wavelengths);
+  const last = Math.max(...wavelengths);
+  if (last - first < Math.max(0.02, first * 0.02)) return '';
+  return `<p class="wavelength-caution">These frames span approximately ${first.toFixed(2)}–${last.toFixed(2)} µm at the target. Brightness changes may reflect different wavelengths; compare positions separately.</p>`;
+}
 function timeline(frames, band) {
   const patch = state.patch;
   const all = allBandFrames();
   const curr = currentFrame();
   const lookup = new Map(all.map(f => [f.dateId, f]));
   const dayCounts = new Map();
+  const sampled = patch.source === 'real' && Number.isInteger(patch.candidateCount) && Number.isInteger(patch.attemptedCount)
+    && patch.candidateCount > patch.attemptedCount
+    ? ` · sampled ${patch.attemptedCount} of ${patch.candidateCount} candidate exposures` : '';
   for (const date of patch.dates) {
     const day = date.id.slice(0, 10);
     dayCounts.set(day, (dayCounts.get(day) || 0) + 1);
@@ -236,7 +256,8 @@ function timeline(frames, band) {
       <div class="timeline-range"><label for="range-from">From</label><input class="date-input" id="range-from" data-range="from" type="date" value="${esc(state.from)}" min="2025-05-01" max="${new Date().toISOString().slice(0, 10)}" aria-label="Earliest UTC date">
       <label for="range-to">to</label><input class="date-input" id="range-to" data-range="to" type="date" value="${esc(state.to)}" min="2025-05-01" max="${new Date().toISOString().slice(0, 10)}" aria-label="Latest UTC date">
       <button type="button" class="pill-button" data-action="clear-range" ${!state.from && !state.to ? 'disabled' : ''}>All dates</button></div></div>
-      <div class="timeline-summary ${frames.length ? '' : 'empty'}">${frames.length ? `Showing ${frames.length} of ${all.length} frames at ${esc(rangeLabel(band))}` : `No frames at ${esc(rangeLabel(band))} in this date range. Widen the range or choose another wavelength.`}</div>
+      <div class="timeline-summary ${frames.length ? '' : 'empty'}">${frames.length ? `Showing ${frames.length} of ${all.length} loaded frames at ${esc(rangeLabel(band))}${sampled}` : `No frames at ${esc(rangeLabel(band))} in this date range. Widen the range or choose another wavelength.`}</div>
+      ${wavelengthComparisonNote(frames, patch.source)}
       <div class="timeline-content"><div class="playback"><button type="button" class="soft-button" data-action="prev" ${frames.length < 2 ? 'disabled' : ''} aria-label="Previous frame">Ⅰ◀</button>
       <button type="button" class="primary-button" data-action="play" ${frames.length < 2 ? 'disabled' : ''} aria-label="${state.playing ? 'Pause' : 'Play'} timeline">${state.playing ? '❚❚ Pause' : '▶ Play'}</button>
       <button type="button" class="soft-button" data-action="next" ${frames.length < 2 ? 'disabled' : ''} aria-label="Next frame">▶Ⅰ</button></div>
@@ -254,14 +275,14 @@ function settingsPanel(section = 'all', scope = 'desktop') {
   const fovs = [20,10,5].map(n => `<button class="pill-button ${state.fov === n && !state.customFov ? 'active' : ''}" type="button" data-action="fov" data-fov="${n}" aria-pressed="${state.fov === n && !state.customFov}" ${n > maxFov ? 'disabled' : ''}>${{20:'Wide',10:'Medium',5:'Close'}[n]} ${n}′</button>`).join('');
   const detail = `<details class="about" id="frame-details-${scope}" ${state.aboutOpen || section === 'details' ? 'open' : ''}><summary>About this frame <span>${patch.source === 'synthetic' ? 'Synthetic' : 'Real'} · ${frame?.flags.length ? `${frame.flags.length} note(s)` : 'No notes'}</span></summary>
     ${frame ? `<dl><div><dt>Date (UTC)</dt><dd>${esc(displayDate(frame.dateId))} ${esc(patch.dates.find(d => d.id === frame.dateId)?.timeUtc || '')}</dd></div>
-      <div><dt>Wavelength range</dt><dd>${esc(rangeLabel(band))} · Band ${band.number}</dd></div><div><dt>At target</dt><dd>${frame.wavelengthUm == null ? 'Not provided' : `${esc(Number(frame.wavelengthUm).toFixed(2))} µm`}</dd></div>
+      <div><dt>Wavelength range</dt><dd>${esc(rangeLabel(band))} · Band ${band.number}</dd></div><div><dt>At target (approx.)</dt><dd>${frame.wavelengthUm == null ? 'Not provided' : `${esc(Number(frame.wavelengthUm).toFixed(2))} µm`}</dd></div>
       <div><dt>Field of view</dt><dd>${state.fov}′ wide</dd></div><div><dt>Orientation</dt><dd>${esc(patch.orientation)}</dd></div>
       <div><dt>Data notes</dt><dd>${frame.flags.length ? frame.flags.map(f => esc(f.label)).join('; ') : 'None reported'}</dd></div>
       ${patch.source === 'real' ? `<div><dt>Observation ID</dt><dd>${esc(frame.observationId || 'Not provided')}</dd></div><div><dt>Pipeline</dt><dd>${esc(frame.pipelineVersion || 'Not provided')}</dd></div>${patch.releaseDate ? `<div><dt>Release date</dt><dd>${esc(patch.releaseDate)}</dd></div>` : ''}<div><dt>Archive</dt><dd>${frame.archiveUrl ? `<a target="_blank" rel="noopener noreferrer" href="${esc(frame.archiveUrl)}">Open IRSA cutout ↗</a>` : 'Not provided'}</dd></div>` : ''}</dl>${patch.source === 'synthetic' ? '<p class="notice">All demo images, observation times, motion and flags are invented. Motion is exaggerated for illustration.</p>' : patch.warnings?.length ? `<p class="notice">${patch.warnings.map(esc).join(' ')}</p>` : ''}` : '<p class="notice">No frame in this wavelength and date range.</p>'}</details>`;
   const wavelengths = `<section class="settings-section"><h2>Wavelength</h2><p>SPHEREx observes infrared light in six detector bands. Choose a range to see its available frames. Different bands may have different dates and wavelengths within the range.</p>
       <div class="spectrum-ruler" aria-hidden="true">${['#7aa7ff','#4fc3d9','#6dd08a','#e2c54a','#f2994a','#f0776c'].map((color,i) => `<i style="--band-color:${color}" class="${patch.bands.some(b=>b.number===i+1) ? 'present' : ''}"></i>`).join('')}</div>
-      <div class="spectrum-ends"><span>0.75 µm</span><span>5.0 µm</span></div><div class="band-list">${bands}</div>
-      <p class="band-footnote">${patch.source === 'real' ? 'Each detector band is searched separately. Switching bands may take time.' : 'Only bands with images of this patch are listed.'} The exact wavelength at the target can change from frame to frame.</p></section>`;
+      <div class="spectrum-ends"><span>${patch.source === 'real' ? '0.744' : '0.75'} µm</span><span>${patch.source === 'real' ? '5.002' : '5.0'} µm</span></div><div class="band-list">${bands}</div>
+      <p class="band-footnote">${patch.source === 'real' ? 'DR1 and QR3 wide-survey images only; deep-field-only exposures are not searched. Each detector band is searched separately.' : 'Only bands with images of this patch are listed.'} The wavelength at the target can change from frame to frame.</p></section>`;
   const field = `<section class="settings-section"><h2>Field of view</h2><div class="fov-grid">${fovs}<button class="pill-button ${state.customFov ? 'active' : ''}" type="button" data-action="fov-custom" aria-pressed="${state.customFov}">Custom</button></div>
       ${state.customFov ? `<div class="custom-fov"><label for="custom-width-${scope}">Width <output>${state.fov}′</output></label><input id="custom-width-${scope}" data-range="fov" type="range" min="3" max="${Math.floor(maxFov)}" value="${state.fov}" step="1" /></div>` : ''}
       <p class="band-footnote">A smaller patch magnifies the image. For real observations, changing width requests a new cutout.</p></section>`;
@@ -355,11 +376,13 @@ async function loadPatch() {
 function resetHome() {
   state.request?.controller.abort(); ++loadSequence; stopPlayback();
   state.view = 'home'; state.patch = null; state.drawer = ''; state.request = null;
+  state.fov = defaultFov(state.source); state.customFov = false;
   state.raError = ''; state.decError = ''; state.dateError = ''; state.headerRa = null; state.headerDec = null;
   syncUrl(); render();
 }
 function changeSource(source) {
   if (state.source === source) return;
+  if (!state.customFov && state.fov === defaultFov(state.source)) state.fov = defaultFov(source);
   state.source = source;
   if (state.view === 'home') render();
   else loadPatch();
@@ -416,6 +439,7 @@ app.addEventListener('click', event => {
   else if (action === 'source-real') changeSource('real');
   else if (action === 'source-demo') changeSource('synthetic');
   else if (action === 'try-wise') {
+    if (!state.customFov && state.fov === defaultFov(state.source)) state.fov = defaultFov('synthetic');
     state.ra = WISE_0855.ra; state.dec = WISE_0855.dec; state.source = 'synthetic'; state.from = ''; state.to = ''; state.band = 4; state.activeDateId = ''; loadPatch();
   } else if (action === 'retry') loadPatch();
   else if (action === 'cancel') resetHome();
@@ -464,7 +488,8 @@ window.addEventListener('popstate', () => {
   state.from = validDate(p.get('from')) ? p.get('from') : '';
   state.to = validDate(p.get('to')) ? p.get('to') : '';
   state.band = Number(p.get('band')) || 4; state.activeDateId = p.get('date') || '';
-  const fov = Number(p.get('fov')); state.fov = Number.isInteger(fov) && fov >= 3 && fov <= 20 ? fov : 10;
+  state.fov = fovFromQuery(p, state.source);
+  state.customFov = ![5, 10, 20].includes(state.fov);
   if (state.ra && state.dec) loadPatch(); else resetHome();
 });
 

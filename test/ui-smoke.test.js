@@ -14,8 +14,12 @@ test('example loads, date filtering stays inside the range, and errors remain ex
   globalThis.document = { querySelector() { return app; }, addEventListener() {}, hidden: false };
   globalThis.window = { addEventListener() {} };
   const manifest = await readFile(new URL('../public/demo/frames.json', import.meta.url), 'utf8');
-  globalThis.fetch = async url => String(url).includes('frames.json')
+  const realFovs = [];
+  globalThis.fetch = async (url, options) => {
+    if (options?.body) realFovs.push(JSON.parse(options.body).fov_arcmin);
+    return String(url).includes('frames.json')
     ? new Response(manifest, { status: 200 }) : new Response('Unavailable', { status: 503 });
+  };
   await import(`../src/app.js?smoke=${Date.now()}`);
   assert.match(app.innerHTML, /Pick a place in the sky/);
 
@@ -29,21 +33,23 @@ test('example loads, date filtering stays inside the range, and errors remain ex
   click('try-wise');
   await new Promise(resolve => setImmediate(resolve));
   assert.match(app.innerHTML, /SYNTHETIC DEMO — NOT SPHEREx OBSERVATIONS/);
-  assert.match(app.innerHTML, /Showing 8 of 8 frames/);
+  assert.match(app.innerHTML, /Showing 8 of 8 loaded frames/);
 
   listeners.change.forEach(listener => listener({ target: { dataset: { range: 'from' }, value: '2025-11-08' } }));
   listeners.change.forEach(listener => listener({ target: { dataset: { range: 'to' }, value: '2025-11-08' } }));
-  assert.match(app.innerHTML, /Showing 1 of 8 frames/);
+  assert.match(app.innerHTML, /Showing 1 of 8 loaded frames/);
   click('band', { band: '2' });
-  assert.match(app.innerHTML, /Showing 1 of 6 frames/);
+  assert.match(app.innerHTML, /Showing 1 of 6 loaded frames/);
   click('band', { band: '6' });
   assert.match(app.innerHTML, /No frames at 4.42–5.00 µm in this date range/);
   assert.doesNotMatch(app.innerHTML, /b6_2025-11-10\.png/);
   click('clear-range');
-  assert.match(app.innerHTML, /Showing 4 of 4 frames/);
+  assert.match(app.innerHTML, /Showing 4 of 4 loaded frames/);
 
   click('source-real');
   await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(realFovs, [5]);
+  assert.equal(globalThis.location.searchParams.get('fov'), '5');
   assert.match(app.innerHTML, /Could not load this patch/);
   assert.match(app.innerHTML, /Your search has not been replaced with simulated data/);
   assert.doesNotMatch(app.innerHTML, /SYNTHETIC DEMO — NOT SPHEREx OBSERVATIONS/);
@@ -60,22 +66,30 @@ test('real viewer searches selected detector, offers another band after empty re
   globalThis.location = new URL(base);
   globalThis.history = { replaceState(_state, _title, url) { globalThis.location = new URL(url); } };
   globalThis.document = { querySelector() { return app; }, addEventListener() {}, hidden: false };
-  globalThis.window = { addEventListener() {} };
+  const windowListeners = {};
+  globalThis.window = { addEventListener(type, callback) { (windowListeners[type] ||= []).push(callback); } };
   const requestedBands = [];
+  const requestedFovs = [];
   globalThis.fetch = async (_url, options) => {
     const request = JSON.parse(options.body);
     requestedBands.push(request.band);
+    requestedFovs.push(request.fov_arcmin);
     const empty = request.band === 'D2';
     const id = 'b'.repeat(32);
     const manifest = {
       status: empty ? 'empty' : 'ready',
       request,
       grid: { width_pixels: 100, pixel_scale_arcsec: 6, orientation: 'north up, east left' },
+      candidate_count: empty ? 0 : 10, attempted_count: empty ? 0 : 2, skipped_count: empty ? 0 : 8,
       failures: [], limitations: ['Instrument quality flags have not yet been applied.'],
       frames: empty ? [] : [{
         index: 0, date_utc: '2025-05-07 03:12:00.000', band: request.band,
         image_url: `/outputs/${id}/frame_000.png`, source_url: 'https://irsa.ipac.caltech.edu/example',
         center_wavelength_um: 3.2, coverage_fraction: 1,
+      }, {
+        index: 1, date_utc: '2025-05-07 20:15:00.000', band: request.band,
+        image_url: `/outputs/${id}/frame_001.png`, source_url: 'https://irsa.ipac.caltech.edu/example-two',
+        center_wavelength_um: 3.6, coverage_fraction: 1,
       }],
     };
     return new Response(JSON.stringify(manifest), { status: 200 });
@@ -84,9 +98,16 @@ test('real viewer searches selected detector, offers another band after empty re
   const flush = () => new Promise(resolve => setImmediate(resolve));
   await flush();
   assert.deepEqual(requestedBands, ['D4']);
+  assert.deepEqual(requestedFovs, [10]); // Shared coordinate URLs without fov retain their old width.
+  assert.equal(globalThis.location.searchParams.get('fov'), '10');
+  assert.match(app.innerHTML, /10′ wide/);
   assert.match(app.innerHTML, /Real SPHEREx observation|Loading real image/);
   assert.match(app.innerHTML, /\/outputs\/b{32}\/frame_000\.png/);
   assert.match(app.innerHTML, /Instrument quality flags have not yet been applied/);
+  assert.match(app.innerHTML, /sampled 2 of 10 candidate exposures/);
+  assert.match(app.innerHTML, /Brightness changes may reflect different wavelengths/);
+  assert.match(app.innerHTML, /deep-field-only exposures are not searched/);
+  assert.match(app.innerHTML, /2\.423–3\.822 µm/);
   assert.doesNotMatch(app.innerHTML, /SYNTHETIC DEMO — NOT SPHEREx OBSERVATIONS/);
   assert.match(app.innerHTML, /min="2025-05-01"/);
 
@@ -107,4 +128,11 @@ test('real viewer searches selected detector, offers another band after empty re
   await flush();
   assert.deepEqual(requestedBands, ['D4', 'D4', 'D2']);
   assert.match(app.innerHTML, /\/outputs\/b{32}\/frame_000\.png/);
+
+  globalThis.location = new URL(`${base}&fov=5`);
+  windowListeners.popstate.forEach(listener => listener());
+  await flush();
+  assert.equal(requestedFovs.at(-1), 5);
+  assert.equal(globalThis.location.searchParams.get('fov'), '5');
+  assert.match(app.innerHTML, /5′ wide/);
 });

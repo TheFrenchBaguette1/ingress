@@ -15,6 +15,10 @@ class ArchiveUnavailable(RuntimeError):
     """IRSA's image search is temporarily unavailable."""
 
 
+ARCHIVE_QUERY_BUDGET_SECONDS = 20
+ARCHIVE_READ_TIMEOUT_SECONDS = 8
+
+
 class _TimedSession(Session):
     """Bound PyVO's requests; its default SIA session has no read timeout."""
 
@@ -24,7 +28,7 @@ class _TimedSession(Session):
         remaining = self.deadline - monotonic()
         if remaining <= 0:
             raise Timeout("IRSA image-search time budget exhausted")
-        kwargs["timeout"] = min(20, remaining)
+        kwargs["timeout"] = min(ARCHIVE_READ_TIMEOUT_SECONDS, remaining)
         return super().request(*args, **kwargs)
 
 
@@ -54,7 +58,7 @@ def search_observations(
     coord, search_radius_arcsec, collections, start_time, end_time
 ):
     """Find observations overlapping the region and requested UTC interval."""
-    deadline = monotonic() + 45
+    deadline = monotonic() + ARCHIVE_QUERY_BUDGET_SECONDS
     client = _BoundedIrsa(deadline)
     for attempt in range(2):
         try:

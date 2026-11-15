@@ -14,12 +14,13 @@ const DEMO_FRAMES_URL = './public/demo/frames/';
 const MISSION_START = '2025-05-01';
 
 const BAND_INFO = [
-  { number: 1, rangeUm: [0.75, 1.09], color: '#7aa7ff' },
-  { number: 2, rangeUm: [1.10, 1.62], color: '#4fc3d9' },
-  { number: 3, rangeUm: [1.63, 2.41], color: '#6dd08a' },
-  { number: 4, rangeUm: [2.42, 3.82], color: '#e2c54a' },
-  { number: 5, rangeUm: [3.83, 4.41], color: '#f2994a' },
-  { number: 6, rangeUm: [4.42, 5.0], color: '#f0776c' },
+  // SPHEREx Explanatory Supplement v2.1, Table 2 (November 2026).
+  { number: 1, rangeUm: [0.744, 1.116], color: '#7aa7ff' },
+  { number: 2, rangeUm: [1.099, 1.651], color: '#4fc3d9' },
+  { number: 3, rangeUm: [1.636, 2.421], color: '#6dd08a' },
+  { number: 4, rangeUm: [2.423, 3.822], color: '#e2c54a' },
+  { number: 5, rangeUm: [3.809, 4.420], color: '#f2994a' },
+  { number: 6, rangeUm: [4.412, 5.002], color: '#f0776c' },
 ];
 
 export class PatchDataError extends Error {
@@ -48,7 +49,7 @@ function waitForAvailableBuild(ms, signal) {
 // The Python service can prepare only one sequence at once. A browser abort does
 // not necessarily stop a build already running there, so wait and retry a 409.
 export async function retryWhileBusy(operation, { signal, onBusy = () => {}, wait = waitForAvailableBuild,
-  delayMs = 5000, maxRetries = 120 } = {}) {
+  delayMs = 5000, maxRetries = 30 } = {}) {
   for (let retries = 0; ; retries++) {
     if (signal?.aborted) throw new DOMException('The request was cancelled.', 'AbortError');
     try {
@@ -145,6 +146,10 @@ function cleanFlags(flags) {
     code: String(flag.code ?? 'quality'),
     label: flag.label,
   }));
+}
+
+function validCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function utcObservationTime(value) {
@@ -262,10 +267,13 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
     queryRange,
     warnings,
     failureCount: failures,
+    candidateCount: validCount(manifest.candidate_count),
+    attemptedCount: validCount(manifest.attempted_count),
+    skippedCount: validCount(manifest.skipped_count),
   };
 }
 
-export async function fetchRealPatch({ ra, dec, fov = 10, from = '', to = '', band = 4, signal, fetchImpl = fetch }) {
+export async function fetchRealPatch({ ra, dec, fov = 5, from = '', to = '', band = 4, signal, fetchImpl = fetch }) {
   const coords = parseCoordinates(ra, dec);
   if (!coords.isValid) {
     throw new PatchDataError('invalid_request', coords.raError || coords.decError);
@@ -347,7 +355,7 @@ export async function loadDemoPatch({ ra = WISE_0855.ra, dec = WISE_0855.dec, si
   for (const [number, data] of Object.entries(manifest.bands)) {
     const info = BAND_INFO.find(band => band.number === Number(number));
     if (!info) continue;
-    bands.push({ ...info, rangeUm: data.range_um });
+    bands.push({ ...info, rangeUm: data.range_um, approximateRange: true });
     for (const [dateId, frame] of Object.entries(data.frames)) {
       frames.push({
         dateId,

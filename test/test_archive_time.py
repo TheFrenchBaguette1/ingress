@@ -82,7 +82,7 @@ class ArchiveTimeTests(unittest.TestCase):
             patch("archive.Session.request", return_value=object()) as request,
         ):
             session.request("GET", "https://example.org/SIA")
-        self.assertEqual(request.call_args.kwargs["timeout"], 10)
+        self.assertEqual(request.call_args.kwargs["timeout"], 8)
 
     def test_sequence_search_includes_entire_last_utc_day(self):
         request = SequenceRequest(
