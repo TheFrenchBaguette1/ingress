@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 import config
 from archive import ArchiveUnavailable
 from sequence import SequenceRequest, build_sequence
+from sequence_disk_cache import find_saved_sequence
 
 
 app = FastAPI(title="Ingress Backend")
@@ -36,6 +37,18 @@ sequence_cache = OrderedDict()
 MAX_CACHED_SEQUENCES = 32
 
 
+def remember_sequence(key, result):
+    # Empty can mean that the current archive query or all cutouts failed.
+    # A later retry may succeed, or newly released frames may appear.
+    if result.get("status") not in ("ready", "partial"):
+        return
+    with cache_lock:
+        sequence_cache[key] = result
+        sequence_cache.move_to_end(key)
+        if len(sequence_cache) > MAX_CACHED_SEQUENCES:
+            sequence_cache.popitem(last=False)
+
+
 @app.get("/bands")
 def get_bands():
     return {
@@ -58,6 +71,11 @@ def create_sequence(request: SequenceRequest):
             sequence_cache.move_to_end(key)
             return cached
 
+    saved = find_saved_sequence(request, config.OUTPUT_ROOT)
+    if saved is not None:
+        remember_sequence(key, saved)
+        return saved
+
     if not build_lock.acquire(blocking=False):
         raise HTTPException(
             status_code=409,
@@ -66,11 +84,7 @@ def create_sequence(request: SequenceRequest):
 
     try:
         result = build_sequence(request)
-        with cache_lock:
-            sequence_cache[key] = result
-            sequence_cache.move_to_end(key)
-            if len(sequence_cache) > MAX_CACHED_SEQUENCES:
-                sequence_cache.popitem(last=False)
+        remember_sequence(key, result)
         return result
 
     except ArchiveUnavailable as error:
