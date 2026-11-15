@@ -2,6 +2,14 @@
 
 Team Ingress's project for the [2026 NASA Space Apps “Planet X and SPHEREx” challenge](https://www.spaceappschallenge.org/2026/challenges/planet-x-and-spherex/). Enter right ascension and declination, then play through SPHEREx exposures of the same sky region. The frontend and backend live together on this branch.
 
+## Try the live website
+
+**[Open the Ingress viewer](https://ideal-train-jjgp96g4g46rfqgwv-5173.app.github.dev/)** · [Open a real SPHEREx example (RA 120°, Dec −85°)](https://ideal-train-jjgp96g4g46rfqgwv-5173.app.github.dev/?ra=120&dec=-85&band=4&fov=5&from=2025-05-01&to=2026-11-15)
+
+The website's Codespace port 5173 is public, so teammates can use these links without signing in to Sean's GitHub account. GitHub may show a one-time development-port notice; choose **Continue** to open the site. Port 8000 stays private; the website forwards its real-data requests to the Python backend inside the Codespace.
+
+This is a live development preview, available **only while the Codespace and both servers are running**. If the link is unavailable, ask Sean to restart the Codespace and the servers using the commands below. The example reuses saved real observations; a new sky position still depends on IRSA's archive search being reachable. This is not a permanent hosted deployment.
+
 ## Run the complete app
 
 Use a stable Python 3.11–3.14 and Node 20+. On macOS, double-click `setup-python.command` once to create `.venv` and install the Python dependencies. The same setup from a terminal is:
