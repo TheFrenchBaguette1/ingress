@@ -2,6 +2,7 @@
 
 from math import hypot, isfinite
 import re
+from time import monotonic
 from uuid import uuid4
 
 import numpy as np
@@ -21,6 +22,7 @@ MASTER_WIDTH_ARCMIN = 20
 # IRSA sends a square on the native detector axes. The diagonal plus an
 # interpolation margin encloses our north-up square even at a 45° rotation.
 CUTOUT_WIDTH_ARCMIN = hypot(MASTER_WIDTH_ARCMIN, MASTER_WIDTH_ARCMIN) + 0.4
+PADDED_CUTOUT_TIMEOUT_SECONDS = 7
 BRIGHTNESS_UNIT = u.MJy / u.sr
 PROGRESSIVE_PIPELINE = "progressive-v1"
 DETECTOR_IN_PRODUCT = re.compile(r"level2_.+_\d+(?P<band>D[1-6])_spx_.+\.fits")
@@ -82,7 +84,23 @@ class BandWriter:
         if not isfinite(float(row["t_min"])):
             raise ValueError("The exposure has no valid observation time.")
 
-        cutout = load_cutout(row, self.coord, CUTOUT_WIDTH_ARCMIN,
+        deadline = monotonic() + timeout_seconds
+        # Reserve time for the original width. Some archive cells respond
+        # only to a smaller cutout, and this URL may already be cached.
+        padded_timeout = min(PADDED_CUTOUT_TIMEOUT_SECONDS, timeout_seconds / 2)
+        try:
+            return self._align_cutout(row, source_url, CUTOUT_WIDTH_ARCMIN, padded_timeout)
+        except Exception as padded_error:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise
+            try:
+                return self._align_cutout(row, source_url, MASTER_WIDTH_ARCMIN, remaining)
+            except Exception as narrow_error:
+                raise narrow_error from padded_error
+
+    def _align_cutout(self, row, source_url, width, timeout_seconds):
+        cutout = load_cutout(row, self.coord, width,
                              cache=config.CACHE_DOWNLOADS, timeout_seconds=timeout_seconds)
         if cutout["source_url"] != source_url or cutout["detector"] != self.detector:
             raise ValueError("The retrieved exposure differs from the selected parent product.")
@@ -119,6 +137,7 @@ class BandWriter:
             "center_wavelength_um": wavelength if wavelength and wavelength > 0 else None,
             "center_bandwidth_um": bandwidth if bandwidth and bandwidth > 0 else None,
             "coverage_fraction": coverage,
+            "native_cutout_width_arcmin": width,
             "native_cutout_dimensions": {"width": native_width, "height": native_height},
             "source_url": source_url,
             "cutout_url": cutout["cutout_url"],
@@ -178,6 +197,12 @@ class BandWriter:
         if ordered:
             first = ordered[0]["time_mjd"]
             frames = [{**frame, "elapsed_days": frame["time_mjd"] - first} for frame in ordered]
+        cutout_notes = []
+        if any(frame.get("native_cutout_width_arcmin") == MASTER_WIDTH_ARCMIN for frame in frames):
+            cutout_notes.append(
+                "Some exposures use the original 20′ cutout after a wider cutout failed. "
+                "Pixels outside the available archive images remain transparent."
+            )
         manifest = {
             "sequence_id": self.sequence_id,
             "pipeline": PROGRESSIVE_PIPELINE,
@@ -203,6 +228,7 @@ class BandWriter:
             "manifest_url": f"/outputs/{self.sequence_id}/manifest.json",
             "limitations": [
                 *limitations,
+                *cutout_notes,
                 "The wavelength at a sky position can differ between exposures.",
                 "Instrument quality flags have not yet been applied.",
                 "Background and PSF differences have not been corrected.",

@@ -11,7 +11,9 @@ from astropy.time import Time
 import numpy as np
 from PIL import Image
 
-from flipbook_render import BandWriter, CUTOUT_WIDTH_ARCMIN, PROGRESSIVE_PIPELINE
+from flipbook_render import (
+    BandWriter, CUTOUT_WIDTH_ARCMIN, MASTER_WIDTH_ARCMIN, PROGRESSIVE_PIPELINE,
+)
 from sequence import SequenceRequest
 from sequence_disk_cache import find_saved_sequence
 from zoom import ZoomRequest, build_zoom
@@ -98,3 +100,46 @@ class ProgressiveFrameTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "different SPHEREx detector"):
                         writer.align(row, 5)
             load.assert_not_called()
+
+    def test_original_width_retries_same_parent_and_masks_uncaptured_pixels(self):
+        request = SimpleNamespace(ra_deg=12.0, dec_deg=75.0, band="D4",
+                                  start_date=date(2025, 5, 1), end_date=date(2025, 7, 1))
+        source = ("https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/"
+                  "2025W23_1A/l2b-v27-2026-215/4/level2_2025W23_1A_0001_1D4_spx_l2b-v27-2026-215.fits")
+        mjd = Time("2025-06-01").mjd
+        row = {"access_url": source, "energy_bandpassname": "SPHEREx-D4", "t_min": mjd}
+        with TemporaryDirectory() as directory:
+            writer = BandWriter(Path(directory), request, "D4")
+
+            def load(observation, coord, width, *, cache, timeout_seconds):
+                self.assertIs(observation, row)
+                if width == CUTOUT_WIDTH_ARCMIN:
+                    self.assertEqual(timeout_seconds, 7)
+                    raise OSError("archive HTTP 503")
+                self.assertEqual(width, MASTER_WIDTH_ARCMIN)
+                self.assertEqual(timeout_seconds, 11)
+                pixels = np.ones(writer.shape)
+                pixels[:, :40] = np.nan
+                return {
+                    "image": pixels, "wcs": writer.wcs.deepcopy(),
+                    "target_x": 99.5, "target_y": 99.5, "detector": "SPHEREx-D4",
+                    "wavelength_um": 3.1, "bandwidth_um": 0.2, "time_mjd": mjd,
+                    "date_utc": Time(mjd, format="mjd").iso, "brightness_unit": "MJy / sr",
+                    "source_url": source, "cutout_url": source + "?size=0.3333333333333333",
+                }
+
+            with (
+                patch("flipbook_render.monotonic", side_effect=[100, 107]),
+                patch("flipbook_render.load_cutout", side_effect=load) as download,
+            ):
+                frame = writer.align(row, 18)
+            self.assertEqual(download.call_count, 2)
+            self.assertEqual(frame["source_url"], source)
+            self.assertEqual(frame["native_cutout_width_arcmin"], MASTER_WIDTH_ARCMIN)
+            self.assertTrue(np.isnan(frame["image"][100, 5]))
+            self.assertAlmostEqual(frame["image"][100, 100], 1)
+            self.assertLess(frame["coverage_fraction"], 1)
+            manifest = writer.manifest([frame], candidate_count=1, attempted_count=1,
+                                       failure_count=0, status="ready")
+            self.assertEqual(manifest["request"]["fov_arcmin"], MASTER_WIDTH_ARCMIN)
+            self.assertIn("after a wider cutout failed", " ".join(manifest["limitations"]))

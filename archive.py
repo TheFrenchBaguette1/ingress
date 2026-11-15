@@ -185,8 +185,8 @@ def _fallback_intervals(start_time, end_time):
 
 
 def _query_once(coord, search_radius_arcsec, collections, start_time, end_time,
-                band, deadline):
-    client = _BoundedIrsa(deadline)
+                band, deadline, *, read_timeout_seconds=ARCHIVE_READ_TIMEOUT_SECONDS):
+    client = _BoundedIrsa(deadline, read_timeout_seconds=read_timeout_seconds)
     kwargs = {
         "pos": (coord, search_radius_arcsec * u.arcsec),
         "collection": collections,

@@ -172,3 +172,46 @@ class ProgressiveFlipbookTest(TestCase):
             self.assertEqual(result["completed_count"], 6)
             self.assertTrue(all(entry["status"] == "ready" for entry in result["bands"].values()))
             shared.assert_called_once()
+
+    def test_center_catalog_precedes_fallback_to_fewer_known_sources(self):
+        first = Time("2025-06-01", scale="utc").mjd
+        listing = Table(
+            rows=[(first + i / 10, "SPHEREx-D4", candidate(i)["access_url"]) for i in range(59)],
+            names=("t_min", "energy_bandpassname", "access_url"),
+        )
+        job = flipbook._Job("unit", (), request())
+        with patch.object(flipbook, "warm_all_band_listing", side_effect=TimeoutError), \
+             patch.object(flipbook, "_query_once", return_value=listing) as center, \
+             patch.object(flipbook, "find_saved_sources") as saved:
+            rows, partial, notes = flipbook._catalog(job, "D4", monotonic() + 20, False, monotonic())
+            self.assertEqual(len(rows), 59)
+            self.assertTrue(partial)
+            self.assertIn("75 arcseconds", notes[0])
+            self.assertEqual(center.call_args.args[1], 75)
+            self.assertIsNone(center.call_args.args[5])
+            saved.assert_not_called()
+
+    def test_saved_frames_play_during_lookup_and_survive_a_smaller_result(self):
+        seed = {
+            "status": "partial", "frame_count": 4, "candidate_count": 59,
+            "attempted_count": 12, "frames": [candidate(i) for i in range(4)],
+        }
+        self.saved.side_effect = lambda *args, **kwargs: seed if kwargs.get("legacy_seed") else None
+        archive_release = Event()
+
+        def catalog(*args):
+            if not archive_release.wait(timeout=4):
+                raise TimeoutError("test failed to release archive lookup")
+            return [candidate(1)], True, ()
+
+        with patch.object(flipbook, "_catalog", side_effect=catalog):
+            job_id = flipbook.start_flipbook(request())["job_id"]
+            try:
+                running = wait_for(job_id, lambda snap: bool(snap["bands"]["D4"].get("manifest")))
+                self.assertEqual(running["bands"]["D4"]["status"], "running")
+                self.assertEqual(running["frame_count"], 4)
+            finally:
+                archive_release.set()
+                finished = wait_for(job_id, lambda snap: snap["status"] == "complete")
+            self.assertEqual(finished["bands"]["D4"]["manifest"]["frames"], seed["frames"])
+            self.assertIn("earlier sequence contains 4", finished["bands"]["D4"]["error"])

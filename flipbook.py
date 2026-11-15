@@ -18,7 +18,7 @@ from astropy.time import Time
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 import config
-from archive import _query_once, search_observations
+from archive import ArchiveUnavailable, CENTRAL_FALLBACK_RADIUS_ARCSEC, _query_once, search_observations
 from archive_cache import MAX_CACHED_ROWS, cached_search_observations, warm_all_band_listing
 from flipbook_render import BandWriter, archive_product_matches_band
 from saved_sources import find_saved_sources
@@ -33,6 +33,7 @@ FOV_ARCMIN = 20
 MAX_CANDIDATES = 128
 MAX_BAND_SECONDS = 210
 SHARED_QUERY_SECONDS = 6
+CENTER_QUERY_SECONDS = 12
 CUTOUT_TIMEOUT_SECONDS = 18
 CUTOUTS_PER_BAND = 4
 CUTOUT_WORKERS = 8
@@ -40,6 +41,7 @@ MAX_ACTIVE_BANDS = 12
 MAX_JOBS = 32
 WARM_SECONDS = 15 * 60
 FAILURE_REUSE_SECONDS = 15
+PARTIAL_CATALOG_SECONDS = 120
 INITIAL_FRAMES = 3
 UPDATE_FRAMES = 6
 UPDATE_SECONDS = 1.25
@@ -202,9 +204,36 @@ def _listing_incomplete(table):
                 or len(table) >= MAX_CACHED_ROWS)
 
 
+def _center_catalog(coord, first, last, band, deadline):
+    if deadline - monotonic() <= 0:
+        return None
+    try:
+        table = _query_once(
+            coord, CENTRAL_FALLBACK_RADIUS_ARCSEC, config.COLLECTIONS, first, last, band,
+            min(deadline, monotonic() + CENTER_QUERY_SECONDS),
+            read_timeout_seconds=CENTER_QUERY_SECONDS,
+        )
+    except Exception as error:
+        logging.info("SPHEREx center-only archive lookup did not finish: %s", error)
+        return None
+    if not isinstance(table, Table) or not len(table) or "energy_bandpassname" not in table.colnames:
+        return None
+    if band is not None and not any(str(item) == f"SPHEREx-{band}" for item in table["energy_bandpassname"]):
+        return None
+    table.meta["archive_listing_partial"] = True
+    table.meta["archive_listing_window_note"] = (
+        "The broad archive search did not finish. Verified exposures were found "
+        "within 75 arcseconds of the target. The images still use the full requested sky patch."
+    )
+    return table
+
+
 def _shared_catalog(job, coord, radius, first, last, deadline, refresh, scheduled_at):
     with job.listing_lock:
-        lifetime = WARM_SECONDS if job.listing is not None else FAILURE_REUSE_SECONDS
+        if job.listing is None:
+            lifetime = FAILURE_REUSE_SECONDS
+        else:
+            lifetime = PARTIAL_CATALOG_SECONDS if _listing_incomplete(job.listing) else WARM_SECONDS
         checked_at = job.listing_checked_at
         if checked_at is not None:
             if not refresh and monotonic() - checked_at < lifetime:
@@ -225,9 +254,11 @@ def _shared_catalog(job, coord, radius, first, last, deadline, refresh, schedule
         except Exception as exc:
             logging.info("SPHEREx shared archive lookup did not finish: %s", exc)
             table = None
+        if not isinstance(table, Table) or _listing_incomplete(table):
+            table = _center_catalog(coord, first, last, None, deadline)
         job.listing_checked_at = monotonic()
         job.listing_refresh_at = scheduled_at if refresh else None
-        job.listing = table if isinstance(table, Table) and not _listing_incomplete(table) else None
+        job.listing = table
         return job.listing
 
 
@@ -242,17 +273,28 @@ def _catalog(job, band, deadline, refresh, scheduled_at):
     first, last = Time(start.isoformat(), scale="utc"), Time(end.isoformat(), scale="utc")
     radius = FOV_ARCMIN * 60 / sqrt(2)
     table = _shared_catalog(job, coord, radius, first, last, deadline, refresh, scheduled_at)
+    if (table is not None and _listing_incomplete(table)
+            and "energy_bandpassname" in table.colnames
+            and not any(str(item) == f"SPHEREx-{band}" for item in table["energy_bandpassname"])):
+        table = None
     if table is None:
         def lookup(center, width, collections, start_time, end_time, *, band):
+            narrowed = _center_catalog(center, start_time, end_time, band, deadline)
+            if narrowed is not None:
+                return narrowed
             return search_observations(
                 center, width, collections, start_time, end_time, band=band,
-                known_sources=lambda: find_saved_sources(center, band, start_time, end_time),
             )
 
-        table = cached_search_observations(
-            coord, radius, config.COLLECTIONS, first, last, lookup,
-            band=band, refresh=refresh,
-        )
+        try:
+            table = cached_search_observations(
+                coord, radius, config.COLLECTIONS, first, last, lookup,
+                band=band, refresh=refresh,
+            )
+        except ArchiveUnavailable:
+            table = find_saved_sources(coord, band, first, last)
+            if table is None or not len(table):
+                raise
     if not {"t_min", "energy_bandpassname", "access_url"} <= set(table.colnames):
         raise ValueError("IRSA's observation listing is missing required metadata.")
     candidates = {}
@@ -314,16 +356,21 @@ def _candidate_plan(rows):
     return [rows[i] for i in priority + sorted(remaining)]
 
 
-def _saved_manifest(job, band, deadline):
+def _saved_manifest(job, band, deadline, *, legacy_seed=False):
     request = job.request
     exact = SequenceRequest(
         ra_deg=request.ra_deg, dec_deg=request.dec_deg,
         start_date=request.start_date, end_date=request.end_date,
         fov_arcmin=FOV_ARCMIN, band=band,
     )
-    saved = find_saved_sequence(exact, config.OUTPUT_ROOT, deadline=deadline,
-                                pipeline="progressive-v1")
-    return saved if saved and saved.get("cache_age_seconds", 0) < WARM_SECONDS else None
+    saved = find_saved_sequence(
+        exact, config.OUTPUT_ROOT, deadline=deadline, allow_backfill=False,
+        pipeline="legacy" if legacy_seed else "progressive-v1",
+        allow_stale_partial=legacy_seed,
+    )
+    if saved and (legacy_seed or saved.get("cache_age_seconds", 0) < WARM_SECONDS):
+        return saved
+    return None
 
 
 def _progress(manifest):
@@ -337,17 +384,20 @@ def _run_cutouts(job, band, writer, rows, listing_partial, notes, deadline, fall
     pending = {}
     frames = []
     attempted = failures = cursor = published = 0
+    seed_count = fallback.get("frame_count", 0) if fallback else 0
     due = None
     manifest = fallback
 
     def publish_running():
         nonlocal manifest, published, due
-        manifest = writer.manifest(
+        latest = writer.manifest(
             frames, status="partial", candidate_count=total, attempted_count=attempted,
             failure_count=failures, limitations=notes, listing_partial=listing_partial,
             complete=False,
         )
-        published = manifest["frame_count"]
+        published = latest["frame_count"]
+        if published >= seed_count:
+            manifest = latest
         frames.clear()
         due = None
         _publish(job, band, "running", manifest=manifest, candidate_count=total,
@@ -410,6 +460,10 @@ def _run_cutouts(job, band, writer, rows, listing_partial, notes, deadline, fall
                   if not total else
                   f"No usable images could be built from {total} candidate exposures.")
         return _finish_unavailable(job, band, reason, fallback, total, attempted, failures)
+    if published + len(frames) < seed_count:
+        reason = (f"The new lookup prepared {published + len(frames)} usable exposures. "
+                  f"The earlier sequence contains {seed_count} verified images.")
+        return _finish_unavailable(job, band, reason, fallback, total, attempted, failures)
     status = "partial" if listing_partial or attempted < total or failures else "ready"
     manifest = writer.manifest(
         frames, status=status, candidate_count=total, attempted_count=attempted,
@@ -447,11 +501,24 @@ def _build_band(job, band, refresh, previous, scheduled_at):
                 job, band, "The preparation time limit ended before this detector could start.", fallback
             )
         _publish(job, band, "running", **({"manifest": fallback} if fallback else {}))
-        if not refresh and not fallback:
-            saved = _saved_manifest(job, band, deadline)
-            if saved:
-                _publish(job, band, saved["status"], manifest=saved, **_progress(saved))
+        if not fallback:
+            saved = _saved_manifest(job, band, deadline) if not refresh else None
+            if saved and saved["status"] == "ready":
+                _publish(job, band, "ready", manifest=saved, **_progress(saved))
                 return
+            legacy = _saved_manifest(job, band, deadline, legacy_seed=True)
+            seed = max((item for item in (saved, legacy) if item),
+                       default=None, key=lambda item: item["frame_count"])
+            if seed:
+                fallback = {
+                    **seed,
+                    "status": "partial",
+                    "limitations": [
+                        "Showing verified saved frames while the archive checks for more exposures.",
+                        *seed.get("limitations", []),
+                    ],
+                }
+                _publish(job, band, "running", manifest=fallback, **_progress(fallback))
         rows, listing_partial, notes = _catalog(job, band, deadline, refresh, scheduled_at)
         if not rows and not listing_partial:
             _finish_empty(job, band, notes, fallback)

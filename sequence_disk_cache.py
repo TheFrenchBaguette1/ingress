@@ -147,7 +147,8 @@ def intact_saved_frames(manifest, output_root):
     return True
 
 
-def find_saved_sequence(request, output_root, *, deadline=None, pipeline=None):
+def find_saved_sequence(request, output_root, *, deadline=None, pipeline=None,
+                        allow_backfill=True, allow_stale_partial=False):
     """Find an intact completed sequence for this exact request, if available.
 
     Builds with actual frames write their manifest and PNGs under output/.
@@ -169,17 +170,21 @@ def find_saved_sequence(request, output_root, *, deadline=None, pipeline=None):
                 continue
             age_seconds = time() - path.stat().st_mtime
             manifest = json.loads(path.read_text(encoding="utf-8"))
+            stored_pipeline = manifest.get("pipeline", "legacy")
             if (
                 manifest.get("request") != expected_request
                 or manifest.get("sequence_id") != sequence_id
-                or (pipeline is not None and manifest.get("pipeline") != pipeline)
+                or (pipeline is not None and stored_pipeline != pipeline)
                 or manifest.get("pipeline_complete") is False
                 or not cacheable_sequence(manifest)
                 or not 0 <= age_seconds
-                or (manifest["status"] == "partial" and age_seconds >= PARTIAL_TTL_SECONDS)
+                or (not allow_stale_partial and manifest["status"] == "partial"
+                    and age_seconds >= PARTIAL_TTL_SECONDS)
             ):
                 continue
             if manifest.get("science_format") != "aligned-npy-v1":
+                if not allow_backfill:
+                    continue
                 # Older deployments saved only display PNGs. Recover the
                 # original selected FITS products (without a new SIA listing)
                 # before treating a cached answer as zoomable science data.
