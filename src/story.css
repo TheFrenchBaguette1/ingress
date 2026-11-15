@@ -1,0 +1,88 @@
+/* Illustrated scroll story adapted from the design handoff. */
+.home-shell .home{background-color:#0B0D10;background-image:radial-gradient(circle at 40px 60px, rgba(236,238,241,0.5) 0, rgba(236,238,241,0) 1.2px), radial-gradient(circle at 180px 220px, rgba(236,238,241,0.35) 0, rgba(236,238,241,0) 1px), radial-gradient(circle at 310px 90px, rgba(236,238,241,0.6) 0, rgba(236,238,241,0) 1.4px), radial-gradient(circle at 470px 300px, rgba(236,238,241,0.3) 0, rgba(236,238,241,0) 1px), radial-gradient(circle at 560px 140px, rgba(236,238,241,0.45) 0, rgba(236,238,241,0) 1.2px), radial-gradient(circle at 90px 380px, rgba(236,238,241,0.4) 0, rgba(236,238,241,0) 1.1px), radial-gradient(circle at 250px 470px, rgba(236,238,241,0.55) 0, rgba(236,238,241,0) 1.3px), radial-gradient(circle at 640px 430px, rgba(236,238,241,0.35) 0, rgba(236,238,241,0) 1px), radial-gradient(circle at 410px 540px, rgba(236,238,241,0.4) 0, rgba(236,238,241,0) 1.1px), radial-gradient(circle at 700px 40px, rgba(236,238,241,0.5) 0, rgba(236,238,241,0) 1.2px), radial-gradient(circle at 130px 600px, rgba(236,238,241,0.3) 0, rgba(236,238,241,0) 1px), radial-gradient(circle at 590px 620px, rgba(236,238,241,0.45) 0, rgba(236,238,241,0) 1.2px), radial-gradient(circle at 350px 330px, rgba(236,238,241,0.25) 0, rgba(236,238,241,0) 0.9px), radial-gradient(circle at 20px 250px, rgba(236,238,241,0.35) 0, rgba(236,238,241,0) 1px), radial-gradient(circle at 520px 500px, rgba(236,238,241,0.3) 0, rgba(236,238,241,0) 0.9px), radial-gradient(circle at 760px 260px, rgba(236,238,241,0.4) 0, rgba(236,238,241,0) 1.1px);background-size:800px 680px}
+.home-shell .ig-spin{transform-origin:320px 320px;animation:ig-spin 360s linear infinite}
+.home-shell .ig-tw{animation:ig-tw 4.5s ease-in-out infinite}
+.home-shell .ig-fan{animation:ig-fan 6s ease-in-out infinite}
+@keyframes ig-spin{to{transform:rotate(360deg)}}
+@keyframes ig-tw{0%,100%{opacity:1}50%{opacity:.25}}
+@keyframes ig-fan{0%,100%{opacity:.62}50%{opacity:.34}}
+.home-shell .ig-pulse{transform-box:fill-box;transform-origin:center;animation:ig-pulse 3.2s ease-in-out infinite}
+@keyframes ig-pulse{0%,100%{transform:scale(.82);opacity:.15}50%{transform:scale(1.08);opacity:.8}}
+@keyframes ig-flow{to{background-position:0 0,200% 0}}
+@keyframes ig-cue{0%{transform:translateY(-100%)}100%{transform:translateY(260%)}}
+@keyframes sc-rise{from{opacity:0;transform:translateY(70px) scale(.97)}to{opacity:1;transform:none}}
+@keyframes sc-draw{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}
+@keyframes sc-par{from{transform:translateY(46px)}to{transform:translateY(-46px)}}
+@keyframes sc-prog{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@supports (animation-timeline: view()){.home-shell .sc-rise{animation:sc-rise linear both;animation-timeline:view();animation-range:entry 0% entry 90%}.home-shell .sc-draw{stroke-dasharray:1;animation:sc-draw linear both;animation-timeline:view();animation-range:entry 0% cover 32%}.home-shell .sc-par{animation:sc-par linear both;animation-timeline:view()}.home-shell .sc-prog{transform-origin:0 50%;animation:sc-prog linear both;animation-timeline:scroll(root)}}
+.home-shell .tl0{view-timeline-name:--c0}.home-shell .tl1{view-timeline-name:--c1}.home-shell .tl2{view-timeline-name:--c2}.home-shell .tl3a{view-timeline-name:--c3a}.home-shell .tl3b{view-timeline-name:--c3b}.home-shell .tl4{view-timeline-name:--c4}
+.home-shell .p3-move{transform:translate(430px,140px)}.home-shell .p3-dot{transform:translate(500px,322px)}
+.home-shell .ig-word{display:inline-block;animation:ig-word .9s cubic-bezier(.2,.8,.2,1) both}
+@keyframes ig-word{from{opacity:0;transform:translateY(.55em) rotate(5deg)}}
+.home-shell .ig-iris{animation:ig-iris 1.2s cubic-bezier(.2,.8,.2,1) both}
+@keyframes ig-iris{from{clip-path:circle(0% at 50% 50%)}to{clip-path:circle(75% at 50% 50%)}}
+@keyframes p-fade{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
+@keyframes p-drift{from{transform:translateX(40px)}to{transform:translateX(-40px)}}
+@keyframes p2-live{from{transform:rotate(-23deg)}to{transform:rotate(23deg)}}
+@keyframes p2-earth{from{transform:rotate(7deg)}to{transform:rotate(-7deg)}}
+@keyframes p3-move{from{transform:translate(104px,284px) scale(.5)}50%{transform:translate(270px,222px) scale(.72)}to{transform:translate(430px,140px) scale(1)}}
+@keyframes p3-var{0%{transform:scale(.5);opacity:.5}25%{transform:scale(1.35);opacity:1}50%{transform:scale(.5);opacity:.5}75%{transform:scale(1.35);opacity:1}100%{transform:scale(.8);opacity:.75}}
+@keyframes p3-dot{0%{transform:translate(60px,322.0px)}9%{transform:translate(100px,303.9px)}18%{transform:translate(140px,298.2px)}27%{transform:translate(180px,309.0px)}36%{transform:translate(220px,328.8px)}45%{transform:translate(260px,343.8px)}54%{transform:translate(300px,343.8px)}63%{transform:translate(340px,328.8px)}72%{transform:translate(380px,309.0px)}81%{transform:translate(420px,298.2px)}90%{transform:translate(460px,303.9px)}100%{transform:translate(500px,322.0px)}}
+@keyframes p4-fan{from{transform:scaleX(0);opacity:0}to{transform:scaleX(1);opacity:.6}}
+@keyframes h-art{to{transform:translateY(-90px) scale(1.16);opacity:.12}}
+@keyframes h-title{to{transform:translateY(-70px);opacity:0}}
+@keyframes h-scope{to{transform:rotate(-34deg)}}
+@keyframes mq{from{transform:translateX(0)}to{transform:translateX(-34%)}}
+@keyframes mq-r{from{transform:translateX(-34%)}to{transform:translateX(0)}}
+@supports (animation-timeline: view()){@media (prefers-reduced-motion: no-preference){.home-shell .pin{height:max(1050px,calc(100vh + 680px))}.home-shell .pin>.pin-in{position:sticky;top:64px;height:min(700px,calc(100vh - 80px));display:flex;flex-direction:column;justify-content:center}.home-shell .p1-r0{animation:sc-draw linear both;animation-timeline:--c1;animation-range:contain 4% contain 30%;stroke-dasharray:1;}.home-shell .p1-l0{animation:p-fade linear both;animation-timeline:--c1;animation-range:contain 27% contain 35%;}.home-shell .p1-r1{animation:sc-draw linear both;animation-timeline:--c1;animation-range:contain 15% contain 41%;stroke-dasharray:1;}.home-shell .p1-l1{animation:p-fade linear both;animation-timeline:--c1;animation-range:contain 38% contain 46%;}.home-shell .p1-r2{animation:sc-draw linear both;animation-timeline:--c1;animation-range:contain 26% contain 52%;stroke-dasharray:1;}.home-shell .p1-l2{animation:p-fade linear both;animation-timeline:--c1;animation-range:contain 49% contain 57%;}.home-shell .p1-r3{animation:sc-draw linear both;animation-timeline:--c1;animation-range:contain 37% contain 63%;stroke-dasharray:1;}.home-shell .p1-l3{animation:p-fade linear both;animation-timeline:--c1;animation-range:contain 60% contain 68%;}.home-shell .p1-r4{animation:sc-draw linear both;animation-timeline:--c1;animation-range:contain 48% contain 74%;stroke-dasharray:1;}.home-shell .p1-l4{animation:p-fade linear both;animation-timeline:--c1;animation-range:contain 71% contain 79%;}.home-shell .p1-r5{animation:sc-draw linear both;animation-timeline:--c1;animation-range:contain 59% contain 85%;stroke-dasharray:1;}.home-shell .p1-l5{animation:p-fade linear both;animation-timeline:--c1;animation-range:contain 82% contain 90%;}.home-shell .p2-v0{animation:p-fade linear both;animation-timeline:--c2;animation-range:contain 6% contain 16%;}.home-shell .p2-v1{animation:p-fade linear both;animation-timeline:--c2;animation-range:contain 44% contain 54%;}.home-shell .p2-v2{animation:p-fade linear both;animation-timeline:--c2;animation-range:contain 82% contain 92%;}.home-shell .p2-live{animation:p2-live linear both;animation-timeline:--c2;animation-range:contain 0% contain 96%;transform-box:view-box;transform-origin:600px 1500px;}.home-shell .p2-earth{animation:p2-earth linear both;animation-timeline:--c2;animation-range:cover 0% cover 100%;transform-box:view-box;transform-origin:600px 1500px;}.home-shell .p-drift{animation:p-drift linear both;animation-timeline:view()}.home-shell .p3-move{animation:p3-move linear both;animation-timeline:--c3a;animation-range:cover 18% cover 72%;}.home-shell .p3-var{animation:p3-var linear both;animation-timeline:--c3b;animation-range:cover 15% cover 80%;transform-box:fill-box;transform-origin:center;}.home-shell .p3-dot{animation:p3-dot linear both;animation-timeline:--c3b;animation-range:cover 15% cover 80%;}.home-shell .p4-fan{animation:p4-fan linear both;animation-timeline:--c4;animation-range:entry 40% cover 48%;transform-box:view-box;transform-origin:604px 196px;}.home-shell .h-art{animation:h-art linear both;animation-timeline:--c0;animation-range:exit 0% exit 100%;}.home-shell .h-title{animation:h-title linear both;animation-timeline:--c0;animation-range:exit 0% exit 90%;}.home-shell .h-scope{animation:h-scope linear both;animation-timeline:--c0;animation-range:exit 0% exit 100%;transform-box:view-box;transform-origin:170px 480px;}@keyframes h-pr0{to{transform:translate(-70px,50px) rotate(-16deg)}}.home-shell .h-pr0{animation:h-pr0 linear both;animation-timeline:--c0;animation-range:exit 0% exit 100%;transform-box:fill-box;transform-origin:center;}@keyframes h-pr1{to{transform:translate(0px,100px) rotate(0deg)}}.home-shell .h-pr1{animation:h-pr1 linear both;animation-timeline:--c0;animation-range:exit 0% exit 100%;transform-box:fill-box;transform-origin:center;}@keyframes h-pr2{to{transform:translate(80px,50px) rotate(16deg)}}.home-shell .h-pr2{animation:h-pr2 linear both;animation-timeline:--c0;animation-range:exit 0% exit 100%;transform-box:fill-box;transform-origin:center;}.home-shell .mq{animation:mq linear both;animation-timeline:view()}.home-shell .mq-r{animation:mq-r linear both;animation-timeline:view()}}}
+
+/* The SCROLL cue sits inside the hero, above the illustrated Earth limb. */
+.home-shell .site-header { position: sticky; top: 0; z-index: 30; }
+.home-shell .spectrum-rule { position: sticky; top: 58px; z-index: 29; }
+.home-shell .home-hero { position: relative; isolation: isolate; overflow: clip; }
+.home-shell .home-hero > svg[aria-hidden] { pointer-events: none; }
+.home-shell .hero-art svg { display: block; width: 100%; height: auto; }
+.home-shell .hero-art .art-caption { display: block; }
+.home-shell .story-scroll-cue {
+  position: absolute; left: 50%; bottom: 28px; z-index: 2;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  transform: translateX(-50%); font: 12px 'IBM Plex Mono', ui-monospace, monospace;
+  letter-spacing: .14em; color: #b4bbc6; pointer-events: none;
+}
+.home-shell .story-scroll-cue i {
+  position: relative; display: block; width: 1px; height: 44px;
+  overflow: hidden; background: #3a414d;
+}
+.home-shell .story-scroll-cue i::after {
+  content: ''; position: absolute; left: 0; top: 0; width: 1px; height: 18px;
+  background: #eceef1; animation: ig-cue 1.8s ease-in-out infinite;
+}
+.home-shell .home-story { min-width: 0; }
+.home-shell .home-story #console { scroll-margin-top: 90px; }
+.home-shell #home-form { scroll-margin-top: 90px; }
+.home-shell .home-story svg { max-width: 100%; }
+.home-shell .home-story .pin > .pin-in { min-height: 0; }
+@media (max-width: 760px) {
+  .home-shell .home-story .pin { height: auto !important; }
+  .home-shell .home-story .pin > .pin-in { position: static !important; height: auto !important; }
+  .home-shell .home-story .pin svg[viewBox="0 0 1200 500"] { max-width: none; }
+  .home-shell .story-scroll-cue { bottom: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .home-shell .pin { height: auto !important; }
+  .home-shell .pin > .pin-in { position: static !important; height: auto !important; }
+  .home-shell .sc-rise, .home-shell .sc-draw, .home-shell .sc-par,
+  .home-shell .sc-prog, .home-shell .mq, .home-shell .mq-r,
+  .home-shell .p1-r0, .home-shell .p1-r1, .home-shell .p1-r2,
+  .home-shell .p1-r3, .home-shell .p1-r4, .home-shell .p1-r5,
+  .home-shell .p1-l0, .home-shell .p1-l1, .home-shell .p1-l2,
+  .home-shell .p1-l3, .home-shell .p1-l4, .home-shell .p1-l5,
+  .home-shell .p2-v0, .home-shell .p2-v1, .home-shell .p2-v2,
+  .home-shell .p2-live, .home-shell .p2-earth, .home-shell .p3-move,
+  .home-shell .p3-var, .home-shell .p3-dot, .home-shell .p4-fan,
+  .home-shell .h-art, .home-shell .h-title, .home-shell .h-scope,
+  .home-shell .h-pr0, .home-shell .h-pr1, .home-shell .h-pr2,
+  .home-shell .story-scroll-cue i::after, .home-shell .ig-spin,
+  .home-shell .ig-tw, .home-shell .ig-fan, .home-shell .ig-pulse { animation: none !important; }
+  .home-shell .sc-prog { transform: none !important; }
+}

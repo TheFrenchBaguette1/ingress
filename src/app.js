@@ -1,4 +1,5 @@
 import { WISE_0855, parseCoordinates, fetchRealPatch, loadDemoPatch } from './data.js';
+import { homeStory, heroArt, heroOrnaments } from './story.js';
 
 const app = document.querySelector('#app');
 const params = new URLSearchParams(location.search);
@@ -129,7 +130,7 @@ function header() {
       <button class="soft-button" type="submit">Show patch</button>
     </form><div class="header-source">${sourceChoice()}</div>
     <button class="mobile-change" data-action="home" type="button">Change patch</button>` : `<div class="home-source-label">Data ${sourceChoice()}</div>`}
-  </header>${compact && (state.raError || state.decError) ? `<div class="header-validation" role="alert">${esc(state.raError || state.decError)}</div>` : ''}<div class="spectrum-rule" aria-hidden="true"></div>`;
+  </header>${compact && (state.raError || state.decError) ? `<div class="header-validation" role="alert">${esc(state.raError || state.decError)}</div>` : ''}<div class="spectrum-rule ${compact ? '' : 'sc-prog'}" aria-hidden="true"></div>`;
 }
 function footer() {
   return `<footer class="site-footer">Team Ingress · NASA Space Apps Challenge 2026 project · Independent of NASA.
@@ -138,8 +139,9 @@ function footer() {
 }
 function home() {
   return `<main class="home">
-    <section class="home-hero" aria-labelledby="hero-title">
-      <div>
+    <section class="home-hero tl0" id="start" aria-labelledby="hero-title">
+      ${heroOrnaments()}
+      <div class="h-title">
         <div class="eyebrow">SPHEREx · Sky-patch time viewer</div>
         <h1 class="hero-title" id="hero-title">Pick a place in the sky.<br><em>Flip through dates</em><br>to see what changed.</h1>
         <p class="hero-description">Enter sky coordinates, then step through available images to spot light that moves or changes.</p>
@@ -159,13 +161,10 @@ function home() {
           <details class="explainer"><summary>What are RA and Dec?</summary><p>They are the sky’s longitude and latitude. RA runs from 0 to 24 hours (or 0 to 360°); Dec runs from −90° to +90°.</p></details>
         </form>
       </div>
-      <div class="hero-art"><img src="./public/art/hero.svg" alt="Illustration of a telescope mapping the sky in many infrared colors and snapshots of a moving point across dates" /><div class="art-caption">Illustration, not observational data.</div></div>
+      <div class="hero-art h-art">${heroArt()}</div>
+      <div class="story-scroll-cue" aria-hidden="true"><span>SCROLL</span><i></i></div>
     </section>
-    <section class="how-section" aria-label="How the viewer works"><div class="eyebrow">The idea in three steps</div><h2>Look for what changed.</h2>
-      <div class="how-grid"><div class="how-card"><div class="step">01 / PLACE</div><h3>Choose a sky patch</h3><p>Enter right ascension and declination, or try the clearly labeled synthetic example.</p></div>
-      <div class="how-card"><div class="step">02 / TIME</div><h3>Move through observations</h3><p>Play or step through available frames. The dates are irregular because the sky is observed at different times.</p></div>
-      <div class="how-card"><div class="step">03 / WAVELENGTH</div><h3>Explore infrared light</h3><p>Pick a wavelength range. Each range can have a different set of observation dates.</p></div></div>
-    </section>
+    ${homeStory()}
   </main>`;
 }
 function statusCard(kind) {
@@ -284,7 +283,7 @@ function viewer() {
 }
 function render() {
   const contents = state.view === 'home' ? home() : state.view === 'viewer' ? viewer() : statusCard(state.view);
-  app.innerHTML = `<div class="app-shell">${header()}${contents}${footer()}</div>`;
+  app.innerHTML = `<div class="app-shell ${state.view === 'home' ? 'home-shell' : ''}">${header()}${contents}${footer()}</div>`;
   if (state.drawer) {
     const dialog = app.querySelector('.mobile-drawer');
     if (dialog) { dialog.showModal(); dialog.querySelector('[data-action="close-drawer"]')?.focus(); }
