@@ -35,21 +35,24 @@ function waitForAvailableBuild(ms, signal) {
   });
 }
 
-// The Python service can prepare only one sequence at once. A browser abort does
-// not necessarily stop a build already running there, so wait and retry a 409.
+// Wait only when the archive service explicitly reports that it has no capacity.
 export async function retryWhileBusy(operation, { signal, onBusy = () => {}, wait = waitForAvailableBuild,
-  delayMs = 5000, maxRetries = 30 } = {}) {
+  delayMs = 5000, maxRetries = 30, maxWaitMs = Infinity,
+  timeoutMessage = 'Another archive search is still running. Try again in a few minutes.' } = {}) {
+  let waitRemainingMs = maxWaitMs;
   for (let retries = 0; ; retries++) {
     if (signal?.aborted) throw new DOMException('The request was cancelled.', 'AbortError');
     try {
       return await operation();
     } catch (error) {
       if (error?.code !== 'busy') throw error;
-      if (retries >= maxRetries) {
-        throw new PatchDataError('busy_timeout', 'Another archive search is still running. Try again in a few minutes.', error);
+      const retryDelayMs = error.retryAfterMs ?? delayMs;
+      if (retries >= maxRetries || retryDelayMs > waitRemainingMs) {
+        throw new PatchDataError('busy_timeout', timeoutMessage, error);
       }
+      waitRemainingMs -= retryDelayMs;
       onBusy(retries + 1);
-      await wait(delayMs, signal);
+      await wait(retryDelayMs, signal);
     }
   }
 }
@@ -467,10 +470,11 @@ export function preparedBandPatch(entry, { target, band, queryRange }) {
 }
 
 async function flipbookRequest(path, { signal, body, fetchImpl = fetch, requestBand = false } = {}) {
+  const isScheduling = Boolean(body || requestBand);
   let response;
   try {
     response = await fetchImpl(path, {
-      method: body || requestBand ? 'POST' : 'GET', signal, cache: 'no-store',
+      method: isScheduling ? 'POST' : 'GET', signal, cache: 'no-store',
       headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
@@ -479,11 +483,20 @@ async function flipbookRequest(path, { signal, body, fetchImpl = fetch, requestB
     throw new PatchDataError('backend_unavailable', 'Could not reach the SPHEREx frame service.', error);
   }
   if (!response.ok) {
-    let message = '';
+    let detail;
     try {
       const failure = await response.json();
-      message = failure?.detail || failure?.message;
+      detail = failure?.detail || failure?.message;
     } catch { /* A proxy can return HTML instead of JSON. */ }
+    const message = typeof detail === 'string' ? detail : detail?.message;
+    if (isScheduling && response.status === 503 && (detail?.code === 'flipbook_busy' ||
+        detail === 'The archive queue is full. Try again in a moment.')) {
+      const error = new PatchDataError('busy', message || 'The archive search queue is full.');
+      const retryAfter = response.headers?.get('retry-after')?.trim() ?? '';
+      const retryAfterMs = /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now();
+      if (Number.isFinite(retryAfterMs)) error.retryAfterMs = Math.max(0, retryAfterMs);
+      throw error;
+    }
     const code = response.status === 404 ? 'flipbook_unavailable'
       : response.status === 502 && /IRSA|archive|SPHEREx image search/i.test(message) ? 'archive_unavailable'
       : 'backend_unavailable';
@@ -498,6 +511,13 @@ async function flipbookRequest(path, { signal, body, fetchImpl = fetch, requestB
     if (error instanceof PatchDataError) throw error;
     throw new PatchDataError('invalid_response', 'Could not read the SPHEREx frame status.', error);
   }
+}
+
+function scheduleFlipbookRequest(path, { onBusy, wait, ...options }) {
+  return retryWhileBusy(() => flipbookRequest(path, options), {
+    signal: options.signal, onBusy, wait, delayMs: 3000, maxRetries: 6, maxWaitMs: 24_000,
+    timeoutMessage: 'The archive search queue stayed full. Try again shortly.',
+  });
 }
 
 function validatedFlipbookId(jobId) {
@@ -515,12 +535,14 @@ function detectorNumber(band) {
   return `D${band}`;
 }
 
-export async function startFlipbook({ ra, dec, band = 4, from = '', to = '', refresh = false, signal, fetchImpl = fetch }) {
+export async function startFlipbook({ ra, dec, band = 4, from = '', to = '', refresh = false, signal,
+  onBusy, wait, fetchImpl = fetch }) {
   const target = parseCoordinates(ra, dec);
   if (!target.isValid) throw new PatchDataError('invalid_request', target.raError || target.decError);
   const [start, end] = orderedRange(from || MISSION_START, to || new Date().toISOString().slice(0, 10));
   const body = { ra_deg: target.raDeg, dec_deg: target.decDeg, start_date: start, end_date: end, band: detectorNumber(band) };
-  const payload = await flipbookRequest(`/api/flipbook${refresh ? '?refresh=1' : ''}`, { body, signal, fetchImpl });
+  const payload = await scheduleFlipbookRequest(`/api/flipbook${refresh ? '?refresh=1' : ''}`,
+    { body, signal, onBusy, wait, fetchImpl });
   return { payload, target, queryRange: { from: start, to: end } };
 }
 
@@ -528,9 +550,10 @@ export function readFlipbook(jobId, { signal, fetchImpl = fetch } = {}) {
   return flipbookRequest(`/api/flipbook/${validatedFlipbookId(jobId)}`, { signal, fetchImpl });
 }
 
-export function requestFlipbookBand(jobId, band, { refresh = false, signal, fetchImpl = fetch } = {}) {
+export function requestFlipbookBand(jobId, band, { refresh = false, signal, onBusy, wait, fetchImpl = fetch } = {}) {
   const path = `/api/flipbook/${validatedFlipbookId(jobId)}/band/${detectorNumber(band)}`;
-  return flipbookRequest(`${path}${refresh ? '?refresh=1' : ''}`, { signal, fetchImpl, requestBand: true });
+  return scheduleFlipbookRequest(`${path}${refresh ? '?refresh=1' : ''}`,
+    { signal, onBusy, wait, fetchImpl, requestBand: true });
 }
 
 export function waitForFlipbookUpdate(signal) {

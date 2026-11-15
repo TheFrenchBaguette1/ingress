@@ -439,10 +439,18 @@ function statusCard(kind) {
     if (request.flipbook) {
       const number = request.flipbook.wantedBand ?? state.band;
       const info = flipbookEntry(request.flipbook, number);
+      const waitingForQueue = request.flipbook.queueWaiting.has(number);
+      const heading = waitingForQueue ? 'Waiting to start the archive search'
+        : info?.status === 'queued' ? 'Archive search queued'
+        : number === 'all' ? 'Opening observations across all wavelengths' : `Opening Band ${number} observations`;
+      const progress = waitingForQueue ? 'The search queue is full. This search will retry automatically.'
+        : info?.status === 'queued' ? 'Your search will start when a worker is free.'
+        : info?.candidate_count == null ? 'Finding available SPHEREx exposures…'
+        : `Preparing images from ${info.candidate_count} candidate exposures. Playback opens as soon as the first images arrive.`;
       return `<main class="state-main"><div class="state-card" role="status" aria-live="polite">
-        <h1>${number === 'all' ? 'Opening observations across all wavelengths' : `Opening Band ${esc(number)} observations`}</h1>
+        <h1>${esc(heading)}</h1>
         <p>RA ${esc(request.ra)} · Dec ${esc(request.dec)}</p>
-        <p>${info?.candidate_count == null ? 'Finding available SPHEREx exposures…' : `Preparing images from ${esc(info.candidate_count)} candidate exposures. Playback opens as soon as the first images arrive.`}</p>
+        <p>${esc(progress)}</p>
         <div class="progress-bar" aria-hidden="true"><span></span></div>
         <button type="button" class="pill-button" data-action="cancel">Cancel</button></div></main>`;
     }
@@ -620,7 +628,9 @@ function settingsPanel(section = 'all', scope = 'desktop') {
     const count = prepared ? prepared.frames.filter(frame => inRange(frame.dateId)).length : datesInBand(b.number);
     const progressive = state.prepared?.live;
     const available = b.number === state.band || !!prepared || !!progressive;
-    const label = progressive && !prepared ? entry?.status === 'empty' ? 'No frames' :
+    const label = state.prepared?.queueWaiting?.has(b.number) ? 'Waiting…' :
+      progressive && !prepared ? entry?.status === 'empty' ? 'No frames' :
+      entry?.status === 'queued' ? 'Queued' :
       ACTIVE_BAND_STATUSES.has(entry?.status) ? 'Loading…' :
       entry?.status === 'unavailable' ? 'Retry' : 'Load'
       : !available ? entry?.status === 'empty' ? 'No frames' :
@@ -661,17 +671,18 @@ function bandName(number) {
 
 function flipbookEntry(group, number) {
   if (number !== 'all') return group?.bands?.[`D${number}`];
-  if (!group?.allRequested) return { status: 'idle' };
+  if (!group?.allRequested) return { status: group?.allError ? 'unavailable' : 'idle', error: group?.allError };
   const entries = Object.values(group.bands);
   const reported = entries.filter(entry => Number.isFinite(entry.candidate_count));
   const sum = field => entries.reduce((total, entry) => total + (entry[field] || 0), 0);
   const active = group.jobStatus === 'running' || entries.some(entry => ACTIVE_BAND_STATUSES.has(entry.status));
+  const queued = entries.some(entry => entry.status === 'queued') && !entries.some(entry => entry.status === 'running');
   const hasFrames = entries.some(entry => entry.manifest?.frames?.length);
   const incomplete = entries.some(entry => entry.status === 'unavailable' || entry.status === 'partial');
   const firstBandError = !hasFrames && entries.find(entry =>
     entry.status === 'unavailable' && typeof entry.error === 'string' && entry.error.trim())?.error;
   return {
-    status: active ? 'running' : group.allError ? 'unavailable' : incomplete ? hasFrames ? 'partial' : 'unavailable'
+    status: queued ? 'queued' : active ? 'running' : group.allError ? 'unavailable' : incomplete ? hasFrames ? 'partial' : 'unavailable'
       : hasFrames ? 'ready' : 'empty',
     candidate_count: reported.length ? sum('candidate_count') : null,
     attempted_count: sum('attempted_count'),
@@ -717,6 +728,10 @@ function flipbookNotice() {
   const number = group.wantedBand ?? state.band;
   const entry = flipbookEntry(group, number);
   const loadingPreviews = unreadyFlipbookPreviews(group, number).length;
+  if (group.queueWaiting.has(number)) {
+    const currentBand = number !== state.band ? ` · ${bandName(state.band)} is still selected` : '';
+    return `<p class="notice" role="status" data-flipbook-progress>${esc(`Waiting to start ${bandName(number)}. The search will retry automatically.${currentBand}`)}</p>`;
+  }
   if (!group.scheduling.has(number) && !ACTIVE_BAND_STATUSES.has(entry?.status) && !loadingPreviews) {
     if (group.pinnedBand === number) {
       return '<div class="saved-real-banner"><div><strong>Shared observation sequence</strong><p>Search this patch to build a longer sequence from the archive.</p></div><button class="pill-button" type="button" data-action="expand-flipbook">Load more observations</button></div>';
@@ -728,9 +743,10 @@ function flipbookNotice() {
     }
     return '';
   }
-  let message = number === 'all' ? 'Loading exposures across all wavelengths' : `Loading Band ${number} exposures`;
+  let message = entry?.status === 'queued' ? `${bandName(number)} queued and waiting for a worker`
+    : number === 'all' ? 'Loading exposures across all wavelengths' : `Loading Band ${number} exposures`;
   if (number !== state.band) message += ` · ${bandName(state.band)} is still selected`;
-  else if (entry?.candidate_count != null) {
+  else if (entry?.status !== 'queued' && entry?.candidate_count != null) {
     message += ` · ${group.patches.get(number)?.frames.length || 0} ready · ${entry.attempted_count || 0} of ${entry.candidate_count} candidates checked`;
   }
   return `<p class="notice" role="status" data-flipbook-progress>${esc(message)}</p>`;
@@ -1109,7 +1125,7 @@ function presentFlipbook(group) {
     const waiting = unreadyFlipbookPreviews(group, number);
     const patch = group.patches.get(number);
     const waitingForSharedFrame = !group.opened && waiting.some(frame => frame.dateId === state.activeDateId);
-    if (patch && !waitingForSharedFrame) {
+    if (patch && !waitingForSharedFrame && !group.scheduling.has(number)) {
       const sameBand = state.band === number;
       stopPlayback(); cancelZoom();
       state.patch = patch;
@@ -1134,7 +1150,7 @@ function presentFlipbook(group) {
       return;
     }
     const entry = flipbookEntry(group, number);
-    if (!group.scheduling.has(number) && !waiting.length &&
+    if (!group.scheduling.has(number) && !group.queueWaiting.has(number) && !waiting.length &&
         ['ready', 'partial', 'empty', 'unavailable'].includes(entry?.status)) {
       const reason = entry.error || (entry.status === 'empty'
         ? `No usable images were found for ${bandName(number)} at these coordinates and dates.`
@@ -1168,7 +1184,7 @@ function presentFlipbook(group) {
     }
   }
   const stateKey = [state.view, group.wantedBand, group.bandError,
-    group.jobStatus, group.allRequested,
+    group.jobStatus, group.allRequested, [...group.scheduling].join(','), [...group.queueWaiting].join(','),
     ...Object.values(group.bands).map(entry => `${entry.status}:${entry.candidate_count ?? ''}`)].join('|');
   if (changed || group.lastPaint !== stateKey) {
     group.lastPaint = stateKey;
@@ -1211,11 +1227,18 @@ async function pollFlipbook(group) {
   }
 }
 
+function waitForFlipbookQueue(group, band) {
+  group.queueWaiting.add(band);
+  scheduleFlipbookPaint(group);
+}
+
 async function startFlipbookJob(group, band, refresh = false) {
   const { payload, target, queryRange } = await startFlipbook({
     ...group.query, band, refresh, signal: group.controller.signal,
-  });
+    onBusy: () => waitForFlipbookQueue(group, band),
+  }).finally(() => group.queueWaiting.delete(band));
   if (activeFlipbook !== group) return;
+  if (band === 'all') group.allRequested = true;
   group.jobId = payload.job_id;
   group.target = target;
   group.queryRange = queryRange;
@@ -1262,7 +1285,8 @@ async function loadLiveFlipbook(coords, { restoreSequenceId, forceRefresh }) {
     revision: -1,
     bands: Object.fromEntries([1, 2, 3, 4, 5, 6].map(number => [`D${number}`, { status: 'idle' }])),
     patches: new Map(), records: new Map(), previews: new Map(),
-    pendingPreviews: new Set(), failedPreviews: new Set(), previewErrors: new Map(), scheduling: new Set(),
+    pendingPreviews: new Set(), failedPreviews: new Set(), previewErrors: new Map(),
+    scheduling: new Set(), queueWaiting: new Set(),
   };
   const band = state.band;
   activeFlipbook = group;
@@ -1341,10 +1365,7 @@ async function chooseLiveBand(group, number) {
     return;
   }
   const refresh = ['empty', 'unavailable'].includes(status);
-  if (number === 'all') {
-    group.allRequested = true;
-    group.allError = null;
-  }
+  if (number === 'all') group.allError = null;
   group.scheduling.add(number);
   if (!group.opened) {
     state.band = number;
@@ -1358,7 +1379,9 @@ async function chooseLiveBand(group, number) {
       try {
         const payload = await requestFlipbookBand(group.jobId, number, {
           signal: group.controller.signal, refresh,
+          onBusy: () => waitForFlipbookQueue(group, number),
         });
+        if (number === 'all') group.allRequested = true;
         considerFlipbookSnapshot(group, payload);
         void pollFlipbook(group);
       } catch (error) {
@@ -1370,9 +1393,14 @@ async function chooseLiveBand(group, number) {
     if (activeFlipbook === group && error?.name !== 'AbortError') {
       if (number === 'all') group.allError = error.message;
       else group.bands[`D${number}`] = { status: 'unavailable', error: error.message };
+      if (group.opened && group.wantedBand === number && error.code === 'busy_timeout') {
+        group.wantedBand = null;
+        group.bandError = `${bandName(number)} could not start. ${error.message}`;
+      }
     }
   } finally {
     group.scheduling.delete(number);
+    group.queueWaiting.delete(number);
     scheduleFlipbookPaint(group);
   }
 }

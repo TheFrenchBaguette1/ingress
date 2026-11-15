@@ -1,7 +1,7 @@
 """Build a playable detector sequence while the remaining exposures load."""
 
 import logging
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -40,6 +40,7 @@ CUTOUT_TIMEOUT_SECONDS = 18
 CUTOUTS_PER_BAND = 4
 CUTOUT_WORKERS = 8
 MAX_ACTIVE_BANDS = 12
+MAX_PENDING_BANDS = 72
 MAX_JOBS = 32
 WARM_SECONDS = 15 * 60
 FAILURE_REUSE_SECONDS = 15
@@ -54,6 +55,8 @@ _cutout_executor = ThreadPoolExecutor(max_workers=CUTOUT_WORKERS, thread_name_pr
 _jobs_lock = Lock()
 _jobs = OrderedDict()
 _jobs_by_key = {}
+_pending_bands = OrderedDict()
+_running_bands = set()
 
 
 class FlipbookBusy(RuntimeError):
@@ -88,6 +91,15 @@ class _Job:
     listing_checked_at: float | None = None
     listing_refresh_at: float | None = None
     listing: Table | None = None
+
+
+@dataclass(eq=False, frozen=True)
+class _BandWork:
+    job: _Job
+    band: Band
+    refresh: bool
+    previous: dict
+    requested_at: float
 
 
 def _snapshot(job):
@@ -128,6 +140,26 @@ def _discard_old_job():
     raise FlipbookBusy("The archive queue is full. Try again in a moment.")
 
 
+def _dispatch_pending():
+    """Give each queued sky patch a detector turn as workers free up."""
+    while _pending_bands and len(_running_bands) < MAX_ACTIVE_BANDS:
+        job_id, queue = _pending_bands.popitem(last=False)
+        task = queue.popleft()
+        if queue:
+            _pending_bands[job_id] = queue
+        _running_bands.add(task)
+        _band_executor.submit(_run_band, task)
+
+
+def _run_band(task):
+    try:
+        _build_band(task.job, task.band, task.refresh, task.previous, task.requested_at)
+    finally:
+        with _jobs_lock:
+            _running_bands.discard(task)
+            _dispatch_pending()
+
+
 def _schedule(job, selection, refresh):
     """Schedule under the registry lock to prevent duplicate builds."""
     now = monotonic()
@@ -142,14 +174,16 @@ def _schedule(job, selection, refresh):
             pending.append((band, previous))
     if not pending:
         return
-    active = sum(entry["status"] in _ACTIVE for item in _jobs.values()
-                 for entry in item.bands.values())
-    if active + len(pending) > MAX_ACTIVE_BANDS:
+    waiting = sum(len(queue) for queue in _pending_bands.values())
+    available_workers = MAX_ACTIVE_BANDS - len(_running_bands)
+    if waiting + len(pending) > MAX_PENDING_BANDS + available_workers:
         raise FlipbookBusy("The archive queue is full. Try again in a moment.")
+    queue = _pending_bands.setdefault(job.job_id, deque())
     for band, previous in pending:
         job.bands[band] = {**previous, "status": "queued"}
         job.revision += 1
-        _band_executor.submit(_build_band, job, band, refresh, previous, now)
+        queue.append(_BandWork(job, band, refresh, previous, now))
+    _dispatch_pending()
 
 
 def start_flipbook(request, *, refresh=False):
@@ -506,13 +540,9 @@ def _finish_unavailable(job, band, message, fallback, candidates=0, attempted=0,
 
 
 def _build_band(job, band, refresh, previous, scheduled_at):
-    deadline = scheduled_at + MAX_BAND_SECONDS
+    deadline = monotonic() + MAX_BAND_SECONDS
     fallback = previous.get("manifest")
     try:
-        if monotonic() >= deadline:
-            return _finish_unavailable(
-                job, band, "The preparation time limit ended before this detector could start.", fallback
-            )
         _publish(job, band, "running", **({"manifest": fallback} if fallback else {}))
         if not fallback:
             saved = _saved_manifest(job, band, deadline) if not refresh else None

@@ -136,6 +136,89 @@ test('All wavelengths opens progressively, adds earlier frames without changing 
   click('home');
 });
 
+function queueFull() {
+  return new Response(JSON.stringify({
+    detail: { code: 'flipbook_busy', message: 'The archive queue is full.' },
+  }), { status: 503, headers: { 'Retry-After': '1' } });
+}
+
+test('opening a flipbook retries admission, shows the accepted queue, then opens the first real frame', async () => {
+  let admissions = 0;
+  let releasePoll;
+  const { app, click } = await mount(base, path => {
+    if (path === '/api/flipbook') {
+      if (++admissions === 1) return Promise.resolve(queueFull());
+      return Promise.resolve(payload('running', 1, Object.fromEntries(
+        [1, 2, 3, 4, 5, 6].map(n => [`D${n}`, { status: 'queued' }]))));
+    }
+    assert.equal(path, `/api/flipbook/${jobId}`);
+    return new Promise(resolve => { releasePoll = resolve; });
+  });
+  try {
+    await eventually(() => /Waiting to start the archive search/.test(app.innerHTML));
+    assert.match(app.innerHTML, /This search will retry automatically/);
+    await eventually(() => /Archive search queued/.test(app.innerHTML));
+    assert.match(app.innerHTML, /start when a worker is free/);
+    assert.doesNotMatch(app.innerHTML, /Finding available SPHEREx exposures/);
+    await eventually(() => typeof releasePoll === 'function');
+    releasePoll(payload('complete', 2, {
+      D4: { status: 'ready', manifest: manifest('D4', sequence4, ['2025-06-04 06:30:00.000']) },
+    }));
+    await eventually(() => /Frame 1 of 1/.test(app.innerHTML));
+    assert.equal(admissions, 2);
+  } finally {
+    click('home');
+  }
+});
+
+test('cancel leaves the queue wait and stops automatic admission retries', async () => {
+  const signals = [];
+  const { app, click } = await mount(base, (path, { signal }) => {
+    assert.equal(path, '/api/flipbook');
+    signals.push(signal);
+    return Promise.resolve(queueFull());
+  });
+  await eventually(() => /Waiting to start the archive search/.test(app.innerHTML));
+  click('cancel');
+  assert.match(app.innerHTML, /Show this patch/);
+  assert.ok(signals[0].aborted);
+  await delay(1050);
+  assert.equal(signals.length, 1);
+});
+
+test('band switching keeps the current exposure visible during a retry and after queue admission', async () => {
+  let admissions = 0;
+  let releasePoll;
+  const readyBand4 = { status: 'ready', manifest: manifest('D4', sequence4, ['2025-06-04 06:30:00.000']) };
+  const { app, click } = await mount(`${base}&band=4`, path => {
+    if (path === '/api/flipbook') return Promise.resolve(payload('complete', 1, { D4: readyBand4 }));
+    if (path === `/api/flipbook/${jobId}/band/D1`) {
+      if (++admissions === 1) return Promise.resolve(queueFull());
+      return Promise.resolve(payload('running', 2, { D4: readyBand4, D1: { status: 'queued' } }));
+    }
+    assert.equal(path, `/api/flipbook/${jobId}`);
+    return new Promise(resolve => { releasePoll = resolve; });
+  });
+  try {
+    await eventually(() => /Frame 1 of 1/.test(app.innerHTML));
+    click('band', { band: '1' });
+    await eventually(() => /Waiting to start Band 1/.test(app.innerHTML));
+    assert.match(app.innerHTML, /Band 4 is still selected/);
+    assert.match(app.innerHTML, /data-frame-image src="\/outputs\/b{32}\/frame_000\.png"/);
+    await eventually(() => /Band 1 queued and waiting for a worker/.test(app.innerHTML));
+    assert.match(app.innerHTML, /data-frame-image src="\/outputs\/b{32}\/frame_000\.png"/);
+    await eventually(() => typeof releasePoll === 'function');
+    releasePoll(payload('complete', 3, {
+      D4: readyBand4,
+      D1: { status: 'ready', manifest: manifest('D1', sequence1, ['2025-06-05 06:30:00.000']) },
+    }));
+    await eventually(() => /data-frame-image src="\/outputs\/c{32}\/frame_000\.png"/.test(app.innerHTML));
+    assert.equal(admissions, 2);
+  } finally {
+    click('home');
+  }
+});
+
 test('preview retries and band switches reuse the prepared observations', async () => {
   const oldImage = globalThis.Image;
   const oldCreate = URL.createObjectURL;

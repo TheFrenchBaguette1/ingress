@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { parseCoordinates, loadBundledRealPatch, fetchRealPatch, normalizeSequencePatch, PatchDataError, retryWhileBusy } from '../src/data.js';
+import { parseCoordinates, loadBundledRealPatch, fetchRealPatch, normalizeSequencePatch, PatchDataError,
+  retryWhileBusy, startFlipbook, requestFlipbookBand } from '../src/data.js';
 
 const WISE_0855 = {
   ra: '08h55m10.831s', dec: '-07d14m42.53s',
@@ -255,4 +256,66 @@ test('busy retries stop after 30 five-second waits by default', async () => {
   error => error.code === 'busy_timeout');
   assert.equal(calls, 31);
   assert.equal(waits, 30);
+});
+
+test('flipbook admission retries only queue saturation with the original request and server delay', async () => {
+  const requests = [];
+  const delays = [];
+  const notices = [];
+  const jobId = 'a'.repeat(32);
+  const { payload } = await startFlipbook({ ra: '12', dec: '75', band: 'all', refresh: true,
+    wait: async ms => { delays.push(ms); },
+    onBusy: attempt => { notices.push(attempt); },
+    fetchImpl: async (path, { body }) => {
+      assert.equal(path, '/api/flipbook?refresh=1');
+      requests.push(body);
+      if (requests.length === 1) return new Response(JSON.stringify({
+        detail: { code: 'flipbook_busy', message: 'Queue is full' },
+      }), { status: 503, headers: { 'Retry-After': '4' } });
+      if (requests.length === 2) return new Response(JSON.stringify({
+        detail: 'The archive queue is full. Try again in a moment.',
+      }), { status: 503 });
+      return new Response(JSON.stringify({
+        job_id: jobId, status: 'running', canonical_fov_arcmin: 20,
+        bands: Object.fromEntries([1, 2, 3, 4, 5, 6].map(band => [`D${band}`, { status: 'queued' }])),
+      }));
+    } });
+  assert.equal(payload.job_id, jobId);
+  assert.deepEqual(notices, [1, 2]);
+  assert.deepEqual(delays, [4000, 3000]);
+  assert.equal(new Set(requests).size, 1);
+  assert.deepEqual(JSON.parse(requests[0]).band, 'all');
+
+  let attempts = 0;
+  await assert.rejects(requestFlipbookBand(jobId, 1, {
+    fetchImpl: async () => {
+      attempts++;
+      return new Response(JSON.stringify({ detail: 'Service unavailable' }),
+        { status: 503, headers: { 'Retry-After': '3' } });
+    },
+    wait: async () => assert.fail('A generic outage is not queue saturation.'),
+  }), error => error.code === 'backend_unavailable' && error.message === 'Service unavailable');
+  assert.equal(attempts, 1);
+});
+
+test('flipbook queue retries are bounded and stop promptly after cancellation', async () => {
+  let attempts = 0;
+  const delays = [];
+  const fetchImpl = async () => {
+    attempts++;
+    return new Response(JSON.stringify({ detail: { code: 'flipbook_busy' } }),
+      { status: 503, headers: { 'Retry-After': '7' } });
+  };
+  const jobId = 'a'.repeat(32);
+  await assert.rejects(requestFlipbookBand(jobId, 1, {
+    fetchImpl, wait: async ms => { delays.push(ms); },
+  }), error => error.code === 'busy_timeout');
+  assert.equal(attempts, 4);
+  assert.deepEqual(delays, [7000, 7000, 7000]);
+
+  const controller = new AbortController();
+  await assert.rejects(requestFlipbookBand(jobId, 1, {
+    fetchImpl, signal: controller.signal, onBusy: () => controller.abort(),
+  }), error => error.name === 'AbortError');
+  assert.equal(attempts, 5);
 });

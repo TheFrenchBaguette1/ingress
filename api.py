@@ -175,7 +175,10 @@ def create_flipbook(request: FlipbookRequest, refresh: bool = False):
     try:
         return start_flipbook(request, refresh=refresh)
     except FlipbookBusy as error:
-        raise HTTPException(status_code=503, detail=str(error), headers={"Retry-After": "3"}) from error
+        raise HTTPException(
+            status_code=503, detail={"code": "flipbook_busy", "message": str(error)},
+            headers={"Retry-After": "3"},
+        ) from error
 
 
 @router.get("/flipbook/{job_id}")
@@ -193,7 +196,10 @@ def select_flipbook_band(job_id: str, band: str, refresh: bool = False):
     try:
         result = request_flipbook_band(job_id, band, refresh=refresh)
     except FlipbookBusy as error:
-        raise HTTPException(status_code=503, detail=str(error), headers={"Retry-After": "3"}) from error
+        raise HTTPException(
+            status_code=503, detail={"code": "flipbook_busy", "message": str(error)},
+            headers={"Retry-After": "3"},
+        ) from error
     if result is None:
         raise HTTPException(status_code=404, detail="Flipbook search has expired. Start it again.")
     return result

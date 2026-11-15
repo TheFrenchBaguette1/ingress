@@ -1,4 +1,4 @@
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import date
 from threading import Event
 from time import monotonic, sleep
@@ -62,12 +62,27 @@ class StubWriter:
                 "frames": list(self.frames.values())}
 
 
+class ManualBandExecutor:
+    """Run submitted bands on demand to test a saturated archive queue."""
+
+    def __init__(self):
+        self.tasks = deque()
+
+    def submit(self, function, task):
+        self.tasks.append((function, task))
+
+    def run_next(self):
+        function, task = self.tasks.popleft()
+        function(task)
+
+
 class ProgressiveFlipbookTest(TestCase):
     def setUp(self):
         StubWriter.blocked.clear()
         StubWriter.release.clear()
         self.enterContext(patch.multiple(
-            flipbook, _jobs=OrderedDict(), _jobs_by_key={}, BandWriter=StubWriter,
+            flipbook, _jobs=OrderedDict(), _jobs_by_key={}, _pending_bands=OrderedDict(),
+            _running_bands=set(), BandWriter=StubWriter,
         ))
         self.saved = self.enterContext(patch.object(flipbook, "_saved_manifest", return_value=None))
         self.csv_catalog = self.enterContext(patch.object(flipbook, "search_catalog", return_value=None))
@@ -175,6 +190,56 @@ class ProgressiveFlipbookTest(TestCase):
             self.assertTrue(all(entry["status"] == "ready" for entry in result["bands"].values()))
             self.csv_catalog.assert_called_once()
             slow_fallback.assert_not_called()
+
+    def test_rapid_all_detector_searches_reuse_jobs_and_get_a_full_processing_budget(self):
+        manual = ManualBandExecutor()
+        with (
+            patch.object(flipbook, "_band_executor", manual),
+            patch.object(flipbook, "monotonic", return_value=10) as clock,
+            patch.object(flipbook, "_catalog", return_value=([], False, ())) as catalog,
+        ):
+            requests = [request("all").model_copy(update={"ra_deg": ra}) for ra in range(5)]
+            jobs = [flipbook.start_flipbook(item) for item in requests]
+            self.assertEqual(len(manual.tasks), flipbook.MAX_ACTIVE_BANDS)
+            self.assertEqual(flipbook.start_flipbook(requests[2])["job_id"], jobs[2]["job_id"])
+            self.assertTrue(all(entry["status"] == "queued"
+                                for entry in jobs[4]["bands"].values()))
+
+            # Simulate a wait longer than an entire processing budget.
+            clock.return_value = 10 + 2 * flipbook.MAX_BAND_SECONDS
+            while manual.tasks:
+                self.assertLessEqual(len(manual.tasks), flipbook.MAX_ACTIVE_BANDS)
+                manual.run_next()
+            builds = [call.args for call in catalog.call_args_list]
+            self.assertEqual(len(builds), 5 * len(flipbook.BANDS))
+            trailing = builds[flipbook.MAX_ACTIVE_BANDS:]
+            self.assertEqual([build[0].request.ra_deg for build in trailing[:6]],
+                             [2, 3, 4, 2, 3, 4])
+            for job, band, deadline, refresh, requested_at in trailing:
+                self.assertEqual(deadline, clock.return_value + flipbook.MAX_BAND_SECONDS)
+                self.assertEqual(requested_at, 10)
+            self.assertTrue(all(flipbook.get_flipbook(job["job_id"])["status"] == "complete"
+                                for job in jobs))
+
+    def test_pending_capacity_rejects_only_new_work_while_saturated(self):
+        manual = ManualBandExecutor()
+        first, second, third = (request().model_copy(update={"ra_deg": ra}) for ra in range(3))
+        with (
+            patch.multiple(flipbook, _band_executor=manual, MAX_ACTIVE_BANDS=1, MAX_PENDING_BANDS=1),
+            patch.object(flipbook, "_catalog", return_value=([], False, ())),
+        ):
+            flipbook.start_flipbook(first)
+            queued = flipbook.start_flipbook(second)
+            self.assertEqual(flipbook.start_flipbook(second)["job_id"], queued["job_id"])
+            with self.assertRaises(flipbook.FlipbookBusy):
+                flipbook.start_flipbook(third)
+            self.assertEqual(len(flipbook._jobs), 2)
+            manual.run_next()
+            accepted = flipbook.start_flipbook(third)
+            self.assertEqual(accepted["bands"]["D4"]["status"], "queued")
+            while manual.tasks:
+                manual.run_next()
+            self.assertEqual(flipbook.get_flipbook(accepted["job_id"])["status"], "complete")
 
     def test_center_catalog_precedes_fallback_to_fewer_known_sources(self):
         first = Time("2025-06-01", scale="utc").mjd
