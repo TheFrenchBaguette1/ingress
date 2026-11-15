@@ -4,11 +4,16 @@ Team Ingress's project for the [2026 NASA Space Apps “Planet X and SPHEREx” 
 
 ## Run the complete app
 
-Use Python 3.11+ and Node 20+. In one terminal, from this directory:
+Use a stable Python 3.11–3.14 and Node 20+. On macOS, double-click `setup-python.command` once to create `.venv` and install the Python dependencies. The same setup from a terminal is:
 
 ```sh
-python3 -m venv .venv
+python3.11 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
+```
+
+Then start the backend in one terminal:
+
+```sh
 .venv/bin/python -m uvicorn api:app --host 127.0.0.1 --port 8000
 ```
 
