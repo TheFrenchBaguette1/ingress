@@ -15,6 +15,7 @@ from archive_cache import (
     _write_disk_listing, cached_search_observations, clear_archive_cache,
     warm_all_band_listing,
 )
+from archive import ArchiveUnavailable
 from sequence import SequenceRequest, build_sequence
 
 
@@ -301,11 +302,10 @@ class ArchiveCacheTests(unittest.TestCase):
             patch("sequence.monotonic", side_effect=lambda: clock[0]),
             patch("sequence.load_cutout") as load,
         ):
-            manifest = build_sequence(request)
+            with self.assertRaisesRegex(ArchiveUnavailable, "preparation time budget ended"):
+                build_sequence(request)
 
         load.assert_not_called()
-        self.assertEqual(manifest["attempted_count"], 0)
-        self.assertEqual(manifest["skipped_count"], 1)
 
 
 if __name__ == "__main__":
