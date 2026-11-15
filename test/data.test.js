@@ -109,7 +109,7 @@ test('real adapter posts a single detector and maps backend frames without losin
   assert.ok(patch.frames[0].flags.some(flag => flag.code === 'partial_coverage'));
   assert.ok(patch.frames[0].flags.some(flag => flag.code === 'partial_sequence'));
   assert.equal(patch.failureCount, 1);
-  assert.ok(patch.warnings.some(w => w.includes('could not be loaded')));
+  assert.ok(patch.warnings.some(w => w.includes('could not be used')));
 });
 
 test('archive empty, failed, and busy states remain distinct', async () => {

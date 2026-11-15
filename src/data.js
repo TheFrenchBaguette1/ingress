@@ -208,7 +208,7 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
     .map(value => value.trim());
   const qualityWarning = 'Instrument quality flags have not yet been applied.';
   if (!warnings.includes(qualityWarning)) warnings.unshift(qualityWarning);
-  if (failures) warnings.unshift(`${failures} observation${failures === 1 ? '' : 's'} could not be loaded.`);
+  if (failures) warnings.unshift(`${failures} observation${failures === 1 ? '' : 's'} could not be used (load or coverage issue).`);
   // Older saved sequences can include a sliver of an exposure at the edge of
   // the patch. A missing target wavelength plus low coverage also indicates
   // an edge-only cutout whose center may be blank. New builds validate the
@@ -235,7 +235,7 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
     const flags = [{ code: 'quality_unchecked', label: qualityWarning }];
     if (manifest.status === 'partial') {
       flags.push({ code: 'partial_sequence', label: failures
-        ? 'Some observations could not be loaded for this sequence.'
+        ? 'Some observations could not be used for this sequence.'
         : manifest.archive_listing_partial
           ? 'The archive returned only part of the requested date range.'
           : 'This sequence has incomplete date coverage.' });
