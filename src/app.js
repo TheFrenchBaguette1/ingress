@@ -2,6 +2,8 @@ import { parseCoordinates, fetchZoomedRealPatch, restoreRealSequence, loadBundle
 import { homeStory, heroArt, heroOrnaments } from './story.js';
 
 const app = document.querySelector('#app');
+const staticPreview = document.querySelector('meta[name="ingress-static-preview"]')?.getAttribute?.('content') === 'true';
+const fullViewerUrl = 'https://ideal-train-jjgp96g4g46rfqgwv-5173.app.github.dev/';
 const params = new URLSearchParams(location.search);
 const DEFAULT_FOV = 5;
 function fovFromQuery(query) {
@@ -149,6 +151,7 @@ function restoreRealView() {
   settleFrame();
 }
 function rangeNeedsRefresh() {
+  if (staticPreview) return false;
   const range = state.patch?.queryRange;
   if (state.patch?.source !== 'real' || !range) return false;
   const requestedFrom = state.from || '2025-05-01';
@@ -266,7 +269,7 @@ function header() {
   const compact = state.view !== 'home';
   return `<header class="site-header">
     <button class="brand" type="button" data-action="home" aria-label="Ingress: go to the start page">${headingMark()}<span class="brand-name">Ingress</span><span class="brand-subtitle">SPHEREx sky-patch time viewer</span></button>
-    ${compact ? `<form class="header-form" id="header-form" novalidate>
+    ${staticPreview ? `<a class="pill-button" href="${fullViewerUrl}">Open full viewer ↗</a>` : compact ? `<form class="header-form" id="header-form" novalidate>
       <label>RA <input class="coord-input" name="ra" aria-label="Right ascension" aria-invalid="${!!state.raError}" placeholder="08h55m10.831s" value="${esc(state.headerRa ?? state.ra)}" autocomplete="off"></label>
       <label>Dec <input class="coord-input" name="dec" aria-label="Declination" aria-invalid="${!!state.decError}" placeholder="-07d14m42.53s" value="${esc(state.headerDec ?? state.dec)}" autocomplete="off"></label>
       <button class="soft-button" type="submit">Show patch</button>
@@ -315,7 +318,7 @@ function statusCard(kind) {
   if (kind === 'loading') {
     if (request.savedExample) {
       return `<main class="state-main"><div class="state-card" role="status"><h1>Opening saved SPHEREx observations</h1>
-        <p>RA ${esc(request.ra)} · Dec ${esc(request.dec)} · Band 4</p><button type="button" class="pill-button" data-action="cancel">Cancel</button></div></main>`;
+        <p>RA ${esc(request.ra)} · Dec ${esc(request.dec)} · Band 4</p>${staticPreview ? '' : '<button type="button" class="pill-button" data-action="cancel">Cancel</button>'}</div></main>`;
     }
     const progress = state.request?.preparationProgress;
     const rows = progress?.bands ? Object.entries(progress.bands).map(([band, entry]) =>
@@ -347,6 +350,10 @@ function statusCard(kind) {
       </div>
       ${readyBands.length ? `<div class="empty-band-list" aria-label="Prepared detector bands">${readyBands.map(([band, patch]) => `<button type="button" class="pill-button" data-action="view-prepared-band" data-band="${band}">View ready Band ${band} · ${patch.frames.length} frames</button>`).join('')}</div>` : ''}
       <button type="button" class="pill-button" data-action="retry-preparation">Recheck missing bands</button></div></main>`;
+  }
+  if (staticPreview) {
+    return `<main class="state-main"><div class="state-card" role="alert"><h1>Could not open the saved observations</h1>
+      <p>${esc(state.error?.message || 'The saved files could not be loaded.')}</p><button class="primary-button" data-action="saved-real">Try again</button></div></main>`;
   }
   return `<main class="state-main"><div class="state-card" role="alert"><span class="state-icon">⚠</span><h1>Could not load this patch</h1>
     <p>${esc(state.error?.message || 'The data service did not answer. Please try again.')}</p>
@@ -413,7 +420,7 @@ function timeline(frames, band) {
       <div class="timeline-range"><label for="range-from">From</label><input class="date-input" id="range-from" data-range="from" type="date" value="${esc(state.from)}" min="2025-05-01" max="${new Date().toISOString().slice(0, 10)}" aria-label="Earliest UTC date">
       <label for="range-to">to</label><input class="date-input" id="range-to" data-range="to" type="date" value="${esc(state.to)}" min="2025-05-01" max="${new Date().toISOString().slice(0, 10)}" aria-label="Latest UTC date">
       <button type="button" class="pill-button" data-action="clear-range" ${!state.from && !state.to ? 'disabled' : ''}>All dates</button></div></div>
-      <div class="timeline-summary ${frames.length ? '' : 'empty'}">${frames.length ? `Showing ${frames.length} of ${all.length} loaded frames at ${esc(rangeLabel(band))}${sampled}` : `No loaded frames at ${esc(rangeLabel(band))} in this date range. Search this date range to check the archive.`}</div>
+      <div class="timeline-summary ${frames.length ? '' : 'empty'}">${frames.length ? `Showing ${frames.length} of ${all.length} loaded frames at ${esc(rangeLabel(band))}${sampled}` : `No loaded frames at ${esc(rangeLabel(band))} in this date range.`}</div>
       ${wavelengthComparisonNote(frames)}
       <div class="timeline-content"><div class="playback"><button type="button" class="soft-button" data-action="prev" ${frames.length < 2 ? 'disabled' : ''} aria-label="Previous frame">Ⅰ◀</button>
       <button type="button" class="primary-button" data-action="play" ${frames.length < 2 ? 'disabled' : ''} aria-label="${state.playing ? 'Pause' : 'Play'} timeline">${state.playing ? '❚❚ Pause' : '▶ Play'}</button>
@@ -490,12 +497,12 @@ function viewer() {
     ${patch.backendStatus === 'partial' ? `<span class="partial-note" role="status">${patch.zoomMissingOuterCount
       ? `Outer sky pixels unavailable in ${patch.zoomMissingOuterCount} selected frame${patch.zoomMissingOuterCount === 1 ? '' : 's'}; dates and products unchanged`
       : patch.failureCount ? `Partial sequence · ${patch.failureCount} exposure${patch.failureCount === 1 ? '' : 's'} could not be used` : 'Partial date coverage · the archive search was incomplete'}</span>` : ''}</div>
-    ${patch.bundledRealExample ? `<div class="saved-real-banner" role="status"><div><strong>Saved real observations · RA 180°, Dec −30° · Band 4 · 5′</strong><p>${state.sampleFallback ? `${esc(state.sampleFallback.message)} ` : ''}These SPHEREx frames were prepared earlier. The saved set may omit newly released observations.</p></div><button type="button" class="pill-button" data-action="retry">Search the archive</button></div>` : ''}
+    ${patch.bundledRealExample ? `<div class="saved-real-banner" role="status"><div><strong>Saved real observations · RA 180°, Dec −30° · Band 4 · 5′</strong><p>${staticPreview ? 'This preview plays a saved sequence. Use the full viewer to search other sky coordinates.' : `${state.sampleFallback ? `${esc(state.sampleFallback.message)} ` : ''}These SPHEREx frames were prepared earlier. The saved set may omit newly released observations.`}</p></div>${staticPreview ? '' : '<button type="button" class="pill-button" data-action="retry">Search the archive</button>'}</div>` : ''}
     ${patch.backendStatus === 'partial' && !patch.bundledRealExample ? `<div class="saved-real-banner" role="status"><div><strong>${patch.zoomMissingOuterCount ? 'Incomplete outer sky coverage' : patch.cachedPartial ? 'Cached partial real observations' : 'Partial real observations'}</strong><p>${patch.zoomMissingOuterCount
       ? `The ${patch.zoomMissingOuterCount} affected frames retain the same original products, dates, and central pixels; unavailable outer pixels remain transparent.`
       : `${patch.cachedPartial ? 'These actual SPHEREx frames were reused from a recent search. ' : ''}Some observations or dates may be missing. Refresh to check the archive again.`}</p></div><button type="button" class="pill-button" data-action="${patch.zoomMissingOuterCount ? 'retry-same-parent' : 'refresh-observations'}">${patch.zoomMissingOuterCount ? 'Retry same-parent pixels' : 'Refresh observations'}</button></div>` : ''}
     ${recoveryBanner()}
-    ${frame ? imageStage(frame, band, frames.indexOf(frame), frames) : `<div class="state-card" role="status"><h2>No loaded frames in this range</h2><p>The loaded SPHEREx sample has no frames on the selected dates. The archive may have other observations.</p><button class="pill-button" data-action="search-date-range">Search this date range</button><button class="pill-button" data-action="clear-range">All dates</button></div>`}
+    ${frame ? imageStage(frame, band, frames.indexOf(frame), frames) : `<div class="state-card" role="status"><h2>No loaded frames in this range</h2>${staticPreview ? '' : '<p>The archive may have other observations.</p><button class="pill-button" data-action="search-date-range">Search this date range</button>'}<button class="pill-button" data-action="clear-range">All dates</button></div>`}
     ${timeline(frames, band)}
     <div class="mobile-actions"><button class="soft-button" type="button" data-action="open-bands">Wavelength · ${esc(rangeLabel(band))}</button><button class="soft-button" type="button" data-action="open-details">Details &amp; width</button></div>
     </div></div>${settingsPanel()}</main>${state.drawer ? `<dialog class="mobile-drawer" aria-label="${state.drawer === 'bands' ? 'Wavelength settings' : 'Frame details and field of view'}"><div class="drawer-head"><h2>${state.drawer === 'bands' ? 'Wavelength' : 'Details'}</h2><button class="soft-button" type="button" data-action="close-drawer" aria-label="Close panel">Close ✕</button></div>${settingsPanel(state.drawer, 'mobile')}</dialog>` : ''}`;
@@ -536,16 +543,21 @@ function readForm(form) {
   if (sameQuery && state.view === 'viewer' && !state.recovery) { syncUrl(); render(); return; }
   loadPatch();
 }
-async function showSavedRealExample() {
+async function showSavedRealExample({ restoreView = false } = {}) {
   cancelZoom();
   state.request?.controller.abort();
   const controller = new AbortController();
   const sequence = ++loadSequence;
   stopPlayback();
   state.drawer = '';
-  state.ra = '180'; state.dec = '-30'; state.band = 4; state.fov = 5;
-  state.from = '2025-05-01'; state.to = '2026-11-15';
-  state.customFov = false; state.activeDateId = '';
+  state.ra = '180'; state.dec = '-30'; state.band = 4;
+  state.fov = restoreView ? Math.min(state.fov, DEFAULT_FOV) : DEFAULT_FOV;
+  state.customFov = state.fov !== DEFAULT_FOV;
+  if (!restoreView) {
+    state.from = staticPreview ? '' : '2025-05-01';
+    state.to = staticPreview ? '' : '2026-11-15';
+    state.activeDateId = '';
+  }
   state.linkedSequenceId = null;
   state.prepared = null;
   state.error = null; state.recovery = null; state.sampleFallback = null;
@@ -699,6 +711,7 @@ async function preparePatchSet(coords, restoreSequenceId, signal, request, force
     requestedBand: state.band, jobId: prepared.payload.job_id };
 }
 async function loadPatch({ forceRefresh = false, restoreSequenceId = null } = {}) {
+  if (staticPreview) return showSavedRealExample({ restoreView: true });
   const coords = parseCoordinates(state.ra, state.dec);
   if (!coords.isValid) { state.raError = coords.raError; state.decError = coords.decError; state.view = 'home'; render(); return; }
   state.raError = ''; state.decError = ''; state.dateError = '';
@@ -948,7 +961,10 @@ app.addEventListener('click', event => {
   if (!target) return;
   if (target.tagName === 'A') event.preventDefault();
   const action = target.dataset.action;
-  if (action === 'home') resetHome();
+  if (action === 'home') {
+    if (staticPreview) showSavedRealExample();
+    else resetHome();
+  }
   else if (action === 'retry') loadPatch(state.view === 'error' && state.linkedSequenceId
     ? { restoreSequenceId: state.linkedSequenceId } : { forceRefresh: true });
   else if (action === 'refresh-observations') loadPatch({ forceRefresh: true });
@@ -1013,9 +1029,14 @@ window.addEventListener('popstate', () => {
   state.fov = fovFromQuery(p);
   state.customFov = ![5, 10, 20].includes(state.fov);
   state.linkedSequenceId = /^[a-f0-9]{32}$/.test(p.get('sequence') || '') ? p.get('sequence') : null;
-  if (state.ra && state.dec) loadPatch({ restoreSequenceId: state.linkedSequenceId }); else resetHome();
+  if (staticPreview) showSavedRealExample({ restoreView: true });
+  else if (state.ra && state.dec) loadPatch({ restoreSequenceId: state.linkedSequenceId });
+  else resetHome();
 });
 
-render();
-if (state.ra && state.dec) loadPatch({ restoreSequenceId: state.linkedSequenceId });
-else if (params.has('source')) syncUrl();
+if (staticPreview) showSavedRealExample({ restoreView: true });
+else {
+  render();
+  if (state.ra && state.dec) loadPatch({ restoreSequenceId: state.linkedSequenceId });
+  else if (params.has('source')) syncUrl();
+}

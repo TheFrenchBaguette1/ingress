@@ -4,11 +4,13 @@ Team Ingress's project for the [2026 NASA Space Apps “Planet X and SPHEREx” 
 
 ## Try the live website
 
-**[Open the Ingress viewer](https://ideal-train-jjgp96g4g46rfqgwv-5173.app.github.dev/)** · [Open a saved real SPHEREx example (RA 180°, Dec −30°)](https://ideal-train-jjgp96g4g46rfqgwv-5173.app.github.dev/?ra=180&dec=-30&band=4&fov=5&from=2025-05-01&to=2026-11-15)
+**[Open the live Ingress viewer](https://ideal-train-jjgp96g4g46rfqgwv-5173.app.github.dev/)** · **[Play the saved SPHEREx observations on GitHub Pages](https://thefrenchbaguette1.github.io/ingress/)**
 
 The website's Codespace port 5173 is public, so teammates can use these links without signing in to Sean's GitHub account. GitHub may show a one-time development-port notice; choose **Continue** to open the site. Port 8000 stays private; the website forwards its real-data requests to the Python backend inside the Codespace.
 
-This is a live development preview, available **only while the Codespace and both servers are running**. If the link is unavailable, ask Sean to restart the Codespace and the servers using the commands below. The example contains verified real Band 4 observations, with the original FITS links and dates, and is labeled as a fixed snapshot. A new sky position still depends on IRSA's archive search being reachable. This is not a permanent hosted deployment.
+Use the GitHub Pages link if the Codespace link fails. It plays eight real Band 4 observations at RA 180°, Dec −30° with dates and original FITS links. It works independently of the Codespace. Searching new coordinates requires the live viewer and access to the IRSA archive.
+
+The live viewer is available **only while the Codespace and both servers are running**. If the link is unavailable, use the saved sequence or restart the Codespace and servers using the commands below.
 
 ## Run the complete app
 

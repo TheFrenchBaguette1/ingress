@@ -29,8 +29,9 @@ test('saved real example preserves fixed sky, band, dates, and actual source lin
   assert.equal(patch.bundledRealExample, true);
   assert.equal(patch.frames.length, 8);
   assert.deepEqual(patch.queryRange, { from: '2025-05-01', to: '2026-11-15' });
+  const projectUrl = new URL('https://example.test/ingress/?example=saved');
   assert.ok(patch.frames.every(frame => frame.band === 4 &&
-    frame.imageUrl.startsWith('/public/real-example/ra180-dec-30-d4/') &&
+    new URL(frame.imageUrl, projectUrl).pathname.startsWith('/ingress/public/real-example/ra180-dec-30-d4/') &&
     frame.archiveUrl.startsWith('https://irsa.ipac.caltech.edu/')));
 
   const unsafe = structuredClone(manifest);

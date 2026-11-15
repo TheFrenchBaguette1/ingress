@@ -213,10 +213,10 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
     throw new PatchDataError('low_coverage', 'The archive images only clip the edge of this patch. Try a smaller field or another band.');
   }
   const frames = usableFrames.map(frame => {
+    const isBundledImage = bundledExample && REAL_EXAMPLE_IMAGE.test(frame?.image_url);
     if (!frame || frame.band !== `D${requestedBand}` ||
         typeof frame.image_url !== 'string' ||
-        !(/^\/outputs\/[a-f0-9]{32}\/(?:zoom_\d{3}\/)?frame_\d+\.png$/.test(frame.image_url) ||
-          bundledExample && REAL_EXAMPLE_IMAGE.test(frame.image_url)) ||
+        !(/^\/outputs\/[a-f0-9]{32}\/(?:zoom_\d{3}\/)?frame_\d+\.png$/.test(frame.image_url) || isBundledImage) ||
         typeof frame.source_url !== 'string' || !/^https:\/\//.test(frame.source_url)) {
       throw new PatchDataError('invalid_response', 'The backend returned incomplete image metadata.');
     }
@@ -255,7 +255,7 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
       nativeCutoutDimensions: frame.zoom_native_cutout_dimensions || frame.native_cutout_dimensions || null,
       skyFootprint: frame.sky_footprint || null,
       wavelengthUm: Number.isFinite(wavelength) && wavelength > 0 ? wavelength : null,
-      imageUrl: frame.image_url,
+      imageUrl: isBundledImage ? `.${frame.image_url}` : frame.image_url,
       flags,
       observationId: productId,
       pipelineVersion: '',

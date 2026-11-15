@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 
 test('the home form and old demo links search real observations only', async () => {
   const listeners = {};
@@ -54,6 +55,60 @@ test('the home form and old demo links search real observations only', async () 
   }
   assert.deepEqual(realRequests.map(request => request.band), ['D6', 'D4']);
   assert.equal(globalThis.location.searchParams.get('date'), null);
+});
+
+test('the static Pages preview opens saved real frames and steps through them without an API', async () => {
+  const listeners = {};
+  const app = {
+    innerHTML: '',
+    addEventListener(type, callback) { (listeners[type] ||= []).push(callback); },
+    querySelector() { return null; },
+  };
+  globalThis.location = new URL('https://thefrenchbaguette1.github.io/ingress/?ra=12&dec=75&band=1&fov=20');
+  globalThis.history = { replaceState(_state, _title, url) { globalThis.location = new URL(url); } };
+  globalThis.document = {
+    querySelector(selector) {
+      if (selector === '#app') return app;
+      if (selector === 'meta[name="ingress-static-preview"]') {
+        return { getAttribute(name) { return name === 'content' ? 'true' : null; } };
+      }
+      return null;
+    },
+    addEventListener() {}, hidden: false,
+  };
+  globalThis.window = { addEventListener() {} };
+  const savedPath = '/ingress/public/real-example/ra180-dec-30-d4/';
+  const manifest = await readFile(new URL('../public/real-example/ra180-dec-30-d4/manifest.json', import.meta.url), 'utf8');
+  const fetchedPaths = [];
+  globalThis.fetch = async url => {
+    const path = new URL(url, globalThis.location).pathname;
+    fetchedPaths.push(path);
+    assert.equal(path, `${savedPath}manifest.json`);
+    return new Response(manifest, { status: 200 });
+  };
+
+  await import(`../src/app.js?pages=${Date.now()}`);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(fetchedPaths, [`${savedPath}manifest.json`]);
+  assert.match(app.innerHTML, /Saved real SPHEREx observations/);
+  assert.match(app.innerHTML, /Frame 1 of 8/);
+  assert.match(app.innerHTML, /href="https:\/\/ideal-train-jjgp96g4g46rfqgwv-5173\.app\.github\.dev\//);
+  assert.doesNotMatch(app.innerHTML, /id="(?:home|header)-form"|Search the archive|data-action="(?:refresh-observations|search-date-range|retry-preparation)"/);
+  assert.equal(globalThis.location.searchParams.get('ra'), '180');
+  assert.equal(globalThis.location.searchParams.get('dec'), '-30');
+  assert.equal(globalThis.location.searchParams.get('band'), '4');
+  assert.equal(globalThis.location.searchParams.get('fov'), '5');
+
+  const imagePath = () => new URL(app.innerHTML.match(/data-frame-image src="([^"]+)"/)[1],
+    globalThis.location).pathname;
+  assert.equal(imagePath(), `${savedPath}frame_000.png`);
+  listeners.click.forEach(listener => listener({ target: {
+    closest: () => ({ dataset: { action: 'next' }, tagName: 'BUTTON' }),
+    matches: () => false,
+  } }));
+  assert.match(app.innerHTML, /Frame 2 of 8/);
+  assert.equal(imagePath(), `${savedPath}frame_001.png`);
+  assert.deepEqual(fetchedPaths, [`${savedPath}manifest.json`]);
 });
 
 test('real viewer prepares all detectors and keeps date filtering and band switching local', async () => {
