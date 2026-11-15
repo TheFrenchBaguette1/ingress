@@ -1,5 +1,5 @@
 // The boundary between the sky viewer and its data sources. The demo is a
-// bundled illustration; only /api/patch is permitted to return real images.
+// bundled illustration; only the team's /api/sequence endpoint supplies real images.
 
 export const WISE_0855 = Object.freeze({
   name: 'WISE 0855',
@@ -11,6 +11,7 @@ export const WISE_0855 = Object.freeze({
 
 const DEMO_MANIFEST_URL = './public/demo/frames.json';
 const DEMO_FRAMES_URL = './public/demo/frames/';
+const MISSION_START = '2025-05-01';
 
 const BAND_INFO = [
   { number: 1, rangeUm: [0.75, 1.09], color: '#7aa7ff' },
@@ -104,12 +105,6 @@ function orderedRange(from, to) {
   return from && to && from > to ? [to, from] : [from, to];
 }
 
-function isSafeImagePath(url) {
-  return typeof url === 'string' && url.length > 0 &&
-    !url.startsWith('//') && !url.includes('\\') &&
-    (url.startsWith('/') || url.startsWith('./') || url.startsWith('public/'));
-}
-
 function cleanFlags(flags) {
   if (!Array.isArray(flags)) return [];
   return flags.filter(flag => flag && typeof flag.label === 'string').map(flag => ({
@@ -118,108 +113,149 @@ function cleanFlags(flags) {
   }));
 }
 
-function normalizeFrame(frame, knownDates) {
-  if (!frame || typeof frame !== 'object' ||
-      typeof frame.dateId !== 'string' || !knownDates.has(frame.dateId) ||
-      !Number.isInteger(frame.band) || frame.band < 1 || frame.band > 6 ||
-      !isSafeImagePath(frame.imageUrl)) {
-    throw new PatchDataError('invalid_response', 'The archive returned incomplete image metadata.');
+function utcObservationTime(value) {
+  if (typeof value !== 'string' ||
+      !/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)) {
+    throw new PatchDataError('invalid_response', 'The backend returned an invalid observation time.');
   }
-  const wavelengthUm = frame.wavelengthUm == null || frame.wavelengthUm === ''
-    ? NaN : Number(frame.wavelengthUm);
-  return {
-    dateId: frame.dateId,
-    band: frame.band,
-    wavelengthUm: Number.isFinite(wavelengthUm) ? wavelengthUm : null,
-    imageUrl: frame.imageUrl,
-    flags: cleanFlags(frame.flags),
-    observationId: String(frame.observationId ?? ''),
-    pipelineVersion: String(frame.pipelineVersion ?? ''),
-    archiveUrl: typeof frame.archiveUrl === 'string' && /^https:\/\//.test(frame.archiveUrl)
-      ? frame.archiveUrl : '',
-  };
+  const observedAt = new Date(`${value.replace(' ', 'T')}Z`);
+  if (Number.isNaN(observedAt.getTime())) {
+    throw new PatchDataError('invalid_response', 'The backend returned an invalid observation time.');
+  }
+  return observedAt.toISOString();
 }
 
-export function normalizeRealPatch(payload, requestedTarget) {
-  if (!payload || typeof payload !== 'object') {
-    throw new PatchDataError('invalid_response', 'The archive returned a response we could not read.');
+function stableSourceKey(url) {
+  // The backend's frame index changes when the requested date range changes.
+  // Derive a compact timeline key from the exposure URL instead.
+  let hash = 0xcbf29ce484222325n;
+  for (const char of url) {
+    hash = (hash ^ BigInt(char.codePointAt(0))) * 0x100000001b3n & 0xffffffffffffffffn;
   }
-  if (payload.status === 'unavailable') {
-    throw new PatchDataError('unavailable', String(payload.message || 'The archive is unavailable right now.'));
+  return hash.toString(16).padStart(16, '0');
+}
+
+export function normalizeSequencePatch(manifest, requestedTarget, requestedBand, queryRange, requestedFov = null) {
+  if (!manifest || typeof manifest !== 'object' ||
+      !['ready', 'partial', 'empty'].includes(manifest.status) ||
+      !manifest.request || manifest.request.band !== `D${requestedBand}` ||
+      !Array.isArray(manifest.frames)) {
+    throw new PatchDataError('invalid_response', 'The SPHEREx backend returned an unknown sequence.');
   }
-  if (payload.status !== 'ok' && payload.status !== 'empty') {
-    throw new PatchDataError('invalid_response', 'The archive returned an unknown result.');
+  if (Math.abs(Number(manifest.request.ra_deg) - requestedTarget.raDeg) > 1e-5 ||
+      Math.abs(Number(manifest.request.dec_deg) - requestedTarget.decDeg) > 1e-5 ||
+      !Number.isFinite(Number(manifest.request.ra_deg)) ||
+      !Number.isFinite(Number(manifest.request.dec_deg))) {
+    throw new PatchDataError('invalid_response', 'The backend returned a sequence for another sky position.');
   }
-  if (payload.source !== 'real') {
-    throw new PatchDataError('invalid_response', 'The archive did not verify these images as real observations.');
+  if (requestedFov != null && Number(manifest.request.fov_arcmin) !== requestedFov ||
+      queryRange?.from && manifest.request.start_date !== queryRange.from ||
+      queryRange?.to && manifest.request.end_date !== queryRange.to) {
+    throw new PatchDataError('invalid_response', 'The backend returned a sequence for a different field or date range.');
   }
-  const target = {
-    raDeg: Number(payload.target?.raDeg ?? requestedTarget.raDeg),
-    decDeg: Number(payload.target?.decDeg ?? requestedTarget.decDeg),
-    name: String(payload.target?.name ?? 'Your patch'),
-  };
-  if (!Number.isFinite(target.raDeg) || !Number.isFinite(target.decDeg)) {
-    throw new PatchDataError('invalid_response', 'The archive returned invalid coordinates.');
+  if (manifest.status === 'empty' && manifest.frames.length ||
+      manifest.status !== 'empty' && !manifest.frames.length) {
+    throw new PatchDataError('invalid_response', 'The backend returned inconsistent image counts.');
   }
-  const dates = Array.isArray(payload.dates) ? payload.dates.map(date => {
-    if (!date || typeof date.id !== 'string' || !isoDate(date.id.slice(0, 10)) ||
-        typeof date.observedAt !== 'string' || Number.isNaN(Date.parse(date.observedAt))) {
-      throw new PatchDataError('invalid_response', 'The archive returned an invalid observation date.');
+
+  const failures = Array.isArray(manifest.failures) ? manifest.failures.length : 0;
+  if (manifest.status === 'empty' && failures) {
+    throw new PatchDataError('unavailable', 'The archive found observations, but none could be loaded. Try again shortly.');
+  }
+  const warnings = (Array.isArray(manifest.limitations) ? manifest.limitations : [])
+    .filter(value => typeof value === 'string' && value.trim())
+    .map(value => value.trim());
+  const qualityWarning = 'Instrument quality flags have not yet been applied.';
+  if (!warnings.includes(qualityWarning)) warnings.unshift(qualityWarning);
+  if (failures) warnings.unshift(`${failures} observation${failures === 1 ? '' : 's'} could not be loaded.`);
+  const frames = manifest.frames.map(frame => {
+    if (!frame || frame.band !== `D${requestedBand}` ||
+        typeof frame.image_url !== 'string' ||
+        !/^\/outputs\/[a-f0-9]{32}\/frame_\d+\.png$/.test(frame.image_url) ||
+        typeof frame.source_url !== 'string' || !/^https:\/\//.test(frame.source_url)) {
+      throw new PatchDataError('invalid_response', 'The backend returned incomplete image metadata.');
     }
+    const observedAt = utcObservationTime(frame.date_utc);
+    const flags = [{ code: 'quality_unchecked', label: qualityWarning }];
+    if (manifest.status === 'partial') {
+      flags.push({ code: 'partial_sequence', label: 'Some observations could not be loaded for this sequence.' });
+    }
+    const coverage = Number(frame.coverage_fraction);
+    if (Number.isFinite(coverage) && coverage >= 0 && coverage < 0.999) {
+      flags.push({ code: 'partial_coverage', label: `This image covers ${Math.round(coverage * 100)}% of the requested field.` });
+    }
+    const wavelength = frame.center_wavelength_um == null ? NaN : Number(frame.center_wavelength_um);
     return {
-      id: date.id,
-      observedAt: date.observedAt,
-      timeUtc: new Date(date.observedAt).toISOString().slice(11, 16),
-      visit: date.visit ?? null,
-    };
-  }) : [];
-  const knownDates = new Set(dates.map(date => date.id));
-  if (knownDates.size !== dates.length || !Array.isArray(payload.frames)) {
-    throw new PatchDataError('invalid_response', 'The archive returned inconsistent image dates.');
-  }
-  const frames = payload.frames.map(frame => normalizeFrame(frame, knownDates));
-  if (payload.status === 'empty' && frames.length || payload.status === 'ok' && !frames.length) {
-    throw new PatchDataError('invalid_response', 'The archive returned inconsistent image counts.');
-  }
-  const usedBands = new Set(frames.map(frame => frame.band));
-  const responseBands = Array.isArray(payload.bands) ? payload.bands : [];
-  const bands = BAND_INFO.filter(info => usedBands.has(info.number)).map(info => {
-    const fromServer = responseBands.find(band => band.number === info.number);
-    return {
-      ...info,
-      rangeUm: Array.isArray(fromServer?.rangeUm) && fromServer.rangeUm.length === 2 &&
-        fromServer.rangeUm.every(Number.isFinite) ? fromServer.rangeUm : info.rangeUm,
+      dateId: `${observedAt}#${stableSourceKey(frame.source_url)}`,
+      band: requestedBand,
+      wavelengthUm: Number.isFinite(wavelength) && wavelength > 0 ? wavelength : null,
+      imageUrl: frame.image_url,
+      flags,
+      observationId: '',
+      pipelineVersion: '',
+      archiveUrl: typeof frame.cutout_url === 'string' && /^https:\/\//.test(frame.cutout_url)
+        ? frame.cutout_url : frame.source_url,
     };
   });
+  const ids = new Set(frames.map(frame => frame.dateId));
+  if (ids.size !== frames.length) {
+    throw new PatchDataError('invalid_response', 'The backend returned duplicate observation times.');
+  }
+  const dates = frames.map(frame => {
+    const observedAt = frame.dateId.split('#')[0];
+    return {
+      id: frame.dateId,
+      observedAt,
+      timeUtc: observedAt.slice(11, 16),
+      visit: null,
+    };
+  });
+  const pixelCount = Number(manifest.grid?.width_pixels);
+  const pixelScale = Number(manifest.grid?.pixel_scale_arcsec);
   return {
     source: 'real',
-    status: payload.status,
-    target,
-    dates: dates.sort((a, b) => a.observedAt.localeCompare(b.observedAt)),
-    bands,
+    status: manifest.status === 'empty' ? 'empty' : 'ok',
+    backendStatus: manifest.status,
+    target: { ...requestedTarget, name: requestedTarget.name || 'Your patch' },
+    dates,
+    bands: BAND_INFO.map(band => ({ ...band })),
     frames,
-    sizePx: Number(payload.sizePx) || null,
-    pixelScaleArcsec: Number(payload.pixelScaleArcsec) || null,
-    fovMaxArcmin: Number(payload.fovMaxArcmin) || 20,
-    orientation: String(payload.orientation || 'North up, East left'),
-    releaseDate: isoDate(payload.releaseDate) ? payload.releaseDate : '',
+    sizePx: Number.isFinite(pixelCount) && pixelCount > 0 ? pixelCount : null,
+    pixelScaleArcsec: Number.isFinite(pixelScale) && pixelScale > 0 ? pixelScale : null,
+    fovMaxArcmin: 20,
+    orientation: manifest.grid?.orientation || 'north up, east left',
+    releaseDate: '',
+    queryRange,
+    warnings,
+    failureCount: failures,
   };
 }
 
-export async function fetchRealPatch({ ra, dec, fov = 10, from = '', to = '', signal, fetchImpl = fetch }) {
+export async function fetchRealPatch({ ra, dec, fov = 10, from = '', to = '', band = 4, signal, fetchImpl = fetch }) {
   const coords = parseCoordinates(ra, dec);
   if (!coords.isValid) {
     throw new PatchDataError('invalid_request', coords.raError || coords.decError);
   }
-  const [first, last] = orderedRange(from, to);
-  const query = new URLSearchParams({
-    ra: String(coords.raDeg), dec: String(coords.decDeg), fov: String(positiveFov(fov)),
-  });
-  if (first) query.set('from', first);
-  if (last) query.set('to', last);
+  if (!Number.isInteger(band) || band < 1 || band > 6) {
+    throw new PatchDataError('invalid_request', 'Choose a detector band from 1 through 6.');
+  }
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  const [first, last] = orderedRange(from || MISSION_START, to || todayUtc);
+  const body = {
+    ra_deg: coords.raDeg,
+    dec_deg: coords.decDeg,
+    fov_arcmin: positiveFov(fov),
+    start_date: first,
+    end_date: last,
+    band: `D${band}`,
+  };
   let response;
   try {
-    response = await fetchImpl(`/api/patch?${query}`, { signal, headers: { Accept: 'application/json' } });
+    response = await fetchImpl('/api/sequence', {
+      method: 'POST', signal,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
   } catch (error) {
     if (error?.name === 'AbortError') throw error;
     throw new PatchDataError('unavailable', 'Could not reach the SPHEREx data service. Try again shortly.', error);
@@ -229,6 +265,7 @@ export async function fetchRealPatch({ ra, dec, fov = 10, from = '', to = '', si
     try {
       const failure = await response.json();
       if (typeof failure?.message === 'string') message = failure.message;
+      else if (typeof failure?.detail === 'string') message = failure.detail;
     } catch { /* A proxy can return an HTML error page. */ }
     throw new PatchDataError('unavailable', message || `The SPHEREx data service returned HTTP ${response.status}.`);
   }
@@ -238,7 +275,7 @@ export async function fetchRealPatch({ ra, dec, fov = 10, from = '', to = '', si
   } catch (error) {
     throw new PatchDataError('invalid_response', 'The SPHEREx data service did not return JSON.', error);
   }
-  return normalizeRealPatch(payload, coords);
+  return normalizeSequencePatch(payload, coords, band, { from: first, to: last }, body.fov_arcmin);
 }
 
 export async function loadDemoPatch({ ra = WISE_0855.ra, dec = WISE_0855.dec, signal, fetchImpl = fetch } = {}) {

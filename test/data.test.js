@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { parseCoordinates, loadDemoPatch, fetchRealPatch, normalizeRealPatch, PatchDataError, WISE_0855 } from '../src/data.js';
+import { parseCoordinates, loadDemoPatch, fetchRealPatch, normalizeSequencePatch, PatchDataError, WISE_0855 } from '../src/data.js';
 
 test('sexagesimal and decimal coordinates agree, with bad values rejected', () => {
   const sexagesimal = parseCoordinates(WISE_0855.ra, WISE_0855.dec);
@@ -28,19 +28,72 @@ test('synthetic WISE example is locally sourced and target limited', async () =>
     error => error instanceof PatchDataError && error.code === 'demo_target_unavailable');
 });
 
-test('real adapter sends decimal coordinates and refuses unverified source', async () => {
-  let requested = '';
-  const payload = {
-    status: 'ok', source: 'real',
-    dates: [{ id: '2025-05-07', observedAt: '2025-05-07T03:12:00Z' }],
-    frames: [{ dateId: '2025-05-07', band: 4, wavelengthUm: null, imageUrl: '/api/images/frame.png', flags: [] }],
+function sequenceManifest(status = 'partial', requestOverride = {}) {
+  return {
+    status, sequence_id: 'a'.repeat(32),
+    request: { ra_deg: WISE_0855.raDeg, dec_deg: WISE_0855.decDeg, band: 'D4',
+      fov_arcmin: 5, start_date: '2025-05-01', end_date: new Date().toISOString().slice(0, 10),
+      ...requestOverride },
+    grid: { width_pixels: 50, pixel_scale_arcsec: 6, orientation: 'north up, east left' },
+    limitations: ['Instrument quality flags have not yet been applied.', 'PNG values are for visualization, not photometry.'],
+    failures: status === 'partial' ? [{ error: 'archive timeout' }] : [],
+    frames: status === 'empty' ? [] : [
+      { index: 0, band: 'D4', date_utc: '2025-05-07 03:12:00.000', image_url: `/outputs/${'a'.repeat(32)}/frame_000.png`,
+        source_url: 'https://irsa.ipac.caltech.edu/one', center_wavelength_um: 3.23, coverage_fraction: 0.8 },
+      { index: 1, band: 'D4', date_utc: '2025-05-07 21:05:00.000', image_url: `/outputs/${'a'.repeat(32)}/frame_001.png`,
+        source_url: 'https://irsa.ipac.caltech.edu/two', center_wavelength_um: null, coverage_fraction: 1 },
+    ],
   };
-  const fetchImpl = async url => { requested = url; return new Response(JSON.stringify(payload), { status: 200 }); };
-  const patch = await fetchRealPatch({ ra: WISE_0855.ra, dec: WISE_0855.dec, fov: 5, fetchImpl });
-  assert.match(requested, /^\/api\/patch\?ra=133\.795/);
-  assert.match(requested, /fov=5/);
-  assert.equal(patch.frames[0].wavelengthUm, null);
+}
+
+test('real adapter posts a single detector and maps backend frames without losing same-day observations', async () => {
+  let requested = '';
+  let body;
+  const fetchImpl = async (url, options) => {
+    requested = url;
+    assert.equal(options.method, 'POST');
+    body = JSON.parse(options.body);
+    return new Response(JSON.stringify(sequenceManifest()), { status: 200 });
+  };
+  const patch = await fetchRealPatch({ ra: WISE_0855.ra, dec: WISE_0855.dec, fov: 5, band: 4, fetchImpl });
+  assert.equal(requested, '/api/sequence');
+  assert.ok(Math.abs(body.ra_deg - WISE_0855.raDeg) < 1e-6);
+  assert.equal(body.fov_arcmin, 5);
+  assert.equal(body.band, 'D4');
+  assert.equal(body.start_date, '2025-05-01');
+  assert.equal(body.end_date, new Date().toISOString().slice(0, 10));
+  assert.deepEqual(patch.queryRange, { from: body.start_date, to: body.end_date });
   assert.equal(patch.source, 'real');
-  assert.throws(() => normalizeRealPatch({ ...payload, source: 'synthetic' }, patch.target),
-    error => error.code === 'invalid_response');
+  assert.equal(patch.status, 'ok');
+  assert.equal(patch.backendStatus, 'partial');
+  assert.equal(patch.bands.length, 6);
+  assert.equal(patch.frames.length, 2);
+  assert.notEqual(patch.frames[0].dateId, patch.frames[1].dateId);
+  const changedOrder = sequenceManifest();
+  changedOrder.frames[0].index = 99;
+  assert.equal(normalizeSequencePatch(changedOrder, parseCoordinates(WISE_0855.ra, WISE_0855.dec),
+    4, patch.queryRange, 5).frames[0].dateId, patch.frames[0].dateId);
+  assert.equal(patch.dates[0].id, patch.frames[0].dateId);
+  assert.equal(patch.frames[1].wavelengthUm, null);
+  assert.ok(patch.frames.every(f => f.imageUrl.startsWith('/outputs/') && f.flags.some(flag => flag.code === 'quality_unchecked')));
+  assert.ok(patch.frames[0].flags.some(flag => flag.code === 'partial_coverage'));
+  assert.ok(patch.frames[0].flags.some(flag => flag.code === 'partial_sequence'));
+  assert.equal(patch.failureCount, 1);
+  assert.ok(patch.warnings.some(w => w.includes('could not be loaded')));
+});
+
+test('archive empty, failed, and busy states remain distinct', async () => {
+  const coords = parseCoordinates(WISE_0855.ra, WISE_0855.dec);
+  const empty = sequenceManifest('empty', { end_date: '2025-06-01' });
+  assert.equal(normalizeSequencePatch(empty, coords, 4, { from: '2025-05-01', to: '2025-06-01' }).status, 'empty');
+  empty.failures = [{ error: 'timeout' }];
+  assert.throws(() => normalizeSequencePatch(empty, coords, 4, { from: '2025-05-01', to: '2025-06-01' }),
+    error => error instanceof PatchDataError && error.code === 'unavailable');
+  assert.throws(() => normalizeSequencePatch(sequenceManifest('ready'), coords, 3, {}),
+    error => error instanceof PatchDataError && error.code === 'invalid_response');
+  assert.throws(() => normalizeSequencePatch(sequenceManifest('ready'), coords, 4, {}, 10),
+    error => error instanceof PatchDataError && error.code === 'invalid_response');
+  const fetchImpl = async () => new Response(JSON.stringify({ detail: 'A sequence is already being built.' }), { status: 409 });
+  await assert.rejects(fetchRealPatch({ ra: WISE_0855.ra, dec: WISE_0855.dec, fetchImpl }),
+    error => error.code === 'unavailable' && error.message.includes('already being built'));
 });

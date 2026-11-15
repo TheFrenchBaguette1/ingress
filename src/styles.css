@@ -84,6 +84,7 @@ h1, h2, h3, p { margin-top: 0; }
 .status-badge.synthetic { background: #f1b946; color: #171308; }
 .status-badge.real { background: #d7e2ef; color: #101820; }
 .target-name { font-size: .85rem; }
+.partial-note { color: #f2bd78; font-size: .75rem; }
 .stage-top { display: flex; align-items: end; justify-content: space-between; gap: 10px; margin-bottom: 13px; }
 .frame-date { font: 400 clamp(2rem,3vw,2.75rem) 'Instrument Serif',Georgia,serif; line-height: 1; }
 .frame-ordinal { color: #aeb6c2; margin-left: 12px; font-size: .88rem; white-space: nowrap; }
@@ -171,6 +172,7 @@ h1, h2, h3, p { margin-top: 0; }
 .state-card h1 { font: 400 clamp(2.3rem,4vw,3.3rem) 'Instrument Serif',Georgia,serif; margin: 14px 0 10px; }
 .state-card p { color: #b4bbc6; line-height: 1.6; }
 .state-card .actions { display: flex; gap: 11px; flex-wrap: wrap; margin-top: 22px; }
+.empty-band-list { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 24px; }
 .state-card details { color: #8993a1; font-size: .8rem; margin-top: 20px; overflow-wrap: anywhere; }
 .loading-steps { list-style: none; padding: 0; margin: 20px 0; }
 .loading-steps li { border-left: 2px solid #e2c54a; padding: 4px 12px 14px; color: #b4bbc6; }

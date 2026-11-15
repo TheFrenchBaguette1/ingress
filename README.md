@@ -1,37 +1,33 @@
 # Ingress · SPHEREx sky-patch viewer
 
-Frontend for Team Ingress's [2026 NASA Space Apps “Planet X and SPHEREx” challenge](https://www.spaceappschallenge.org/2026/challenges/planet-x-and-spherex/). Enter RA/Dec, then step through the available observation times and infrared detector bands.
+Team Ingress's project for the [2026 NASA Space Apps “Planet X and SPHEREx” challenge](https://www.spaceappschallenge.org/2026/challenges/planet-x-and-spherex/). Enter right ascension and declination, then play through SPHEREx exposures of the same sky region. The frontend and backend live together on this branch.
 
-## Run it
+## Run the complete app
 
-With Node 20 or later:
-
-```sh
-npm run dev
-```
-
-Open `http://localhost:5173`. No package installation or API key is needed. **Try WISE 0855** loads 18 bundled *synthetic* frames so the controls can be tested while the backend is built. They are invented illustrations with deliberately exaggerated motion, not SPHEREx observations. The real-data option displays an honest unavailable state until the backend is connected.
-
-If Henry's backend runs at `http://localhost:8000`, start the frontend with:
+Use Python 3.11+ and Node 20+. In one terminal, from this directory:
 
 ```sh
-INGRESS_API_ORIGIN=http://localhost:8000 npm run dev
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m uvicorn api:app --host 127.0.0.1 --port 8000
 ```
 
-The dev server forwards `/api/*` to that origin, so the browser requests images and JSON from its own origin. For deployment, serve these files with an equivalent `/api` reverse proxy or serve the frontend from the backend directly.
+In another terminal:
 
-## Integration
+```sh
+INGRESS_API_ORIGIN=http://127.0.0.1:8000 npm run dev
+```
 
-The precise request and response shape is in [docs/data-contract.md](docs/data-contract.md). The browser sends `GET /api/patch?ra=<decimal>&dec=<decimal>&fov=<arcmin>`. It needs browser-readable aligned image cutouts and metadata; raw FITS cannot be shown by an `<img>` element. The frontend normalizes responses in `src/data.js`. The date picker currently filters a complete returned manifest locally so “All dates” and other bands stay available. The backend can support optional `from`/`to` parameters later for large results.
+Open <http://localhost:5173>. The Node server serves the frontend, forwards `POST /api/sequence` to the Python backend's `/sequence`, and forwards `/outputs/*` for generated PNG frames. `npm test` runs the frontend integration checks.
 
-The interface supports decimal or sexagesimal coordinates, inclusive UTC date filters, irregular observation times, per-frame wavelengths and flags, 3–20′ field widths, responsive mobile settings, and URLs with `ra`, `dec`, `source`, `band`, `date`, `fov`, `from`, and `to`. Only the explicit `source=demo` path uses bundled illustrations. Real errors never turn into synthetic data automatically.
+You can run `npm run dev` without Python to explore **Try synthetic WISE 0855**. Its 18 bundled frames are invented illustrations with exaggerated motion, clearly labeled as a synthetic demo. Real observations are never replaced with demo images after an archive error.
 
-## Files
+## How real data works
 
-- `index.html`, `src/app.js`, `src/styles.css`: dependency-free interface.
-- `src/data.js`: coordinate parsing, synthetic manifest, backend response boundary.
-- `public/demo/`: Claude's synthetic frames and metadata, never used as real data.
-- `public/art/hero.svg`, `public/fonts/`: design handoff illustration and bundled fonts.
-- `server.mjs`: optional local static server and `/api` development proxy.
+The backend searches the IRSA SPHEREx DR1 and QR3 collections, downloads FITS cutouts, aligns each exposure to one north-up sky grid, and exports PNGs with a consistent display stretch for a requested detector band. The frontend searches one of six detector bands at a time, so switching bands may trigger another build. It reuses successful results when you revisit a band during the session.
 
-Run `npm test` for the data adapter checks. The implementation follows the latest design handoff; its old comparison controls and hardcoded archive error were intentionally excluded.
+Blank date fields search from May 1, 2025 through the current UTC date. A narrower range reduces work. Widening a range requests more observations; narrowing a loaded range filters its frames locally. The Python backend currently handles one build at a time, and requests can take a while when the archive is slow. Generated files accumulate in `output/` until manually removed.
+
+The backend has **not applied instrument quality flags** and has not corrected background or PSF differences. Partial coverage and failed exposures are shown as data notes. PNGs are for visual comparison, not photometry or proof of a discovery. Source cutout links and wavelengths appear in the frame details when the backend provides them.
+
+The actual API and translation to the UI are documented in [docs/data-contract.md](docs/data-contract.md). The backend entry point is `api.py`; the frontend modules are `src/app.js` and `src/data.js`. The browser always requests its own origin, so deployment needs the same `/api/sequence` and `/outputs/*` routing as `server.mjs`, or an equivalent same-origin service.
