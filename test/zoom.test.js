@@ -51,6 +51,7 @@ test('same-parent zoom keeps exposure order, wavelength, and brightness and reje
   assert.deepEqual(wide.display, base.display);
   assert.equal(wide.baseFovArcmin, 20);
   assert.equal(wide.grid.widthPixels, 200);
+  assert.equal(wide.frames[0].coverageFraction, 1);
 
   const altered = manifest(20, { zoom: true });
   altered.frames[1].source_url = 'https://irsa.ipac.caltech.edu/replacement.fits';
@@ -89,6 +90,7 @@ test('unavailable outer parent pixels remain masked and selected frames stay in 
     fetchImpl: async () => new Response(JSON.stringify(wider)) });
   assert.equal(result.frames.length, base.frames.length);
   assert.equal(result.zoomMissingOuterCount, 1);
+  assert.equal(result.frames[0].coverageFraction, 0.0625);
   assert.ok(result.frames[0].flags.some(flag => flag.code === 'zoom_outer_unavailable' && flag.label.includes('Outer pixels unavailable')));
   assert.ok(result.warnings.some(warning => warning.includes('Outer sky pixels')));
   assert.ok(result.frames.every(frame => !frame.flags.some(flag => flag.code === 'partial_sequence')));
@@ -144,12 +146,14 @@ test('20′ to 10′ to 5′ zoom crops one image set locally, with fixed frame 
     assert.match(app.innerHTML, /Showing 2 of 2 loaded frames/);
     assert.equal(globalThis.location.searchParams.get('date'), selected);
     assert.equal(logs.length, 2);
-    const [first, second] = logs.map(item => item[1]);
+    const [first, second] = logs.map(item => JSON.parse(item[1]));
     assert.equal(first.before.product_id, 'p1.fits');
     assert.equal(first.after.product_id, 'p1.fits');
     assert.deepEqual(first.before.displayed_science_pixel_dimensions.width, 200);
     assert.deepEqual(second.after.displayed_science_pixel_dimensions.width, 50);
     assert.deepEqual(first.after.brightness_scale, second.after.brightness_scale);
+    assert.ok(first.after.sky_footprint_ra_dec_deg[0].dec_deg < 75);
+    assert.ok(first.after.sky_footprint_ra_dec_deg[2].dec_deg > 75);
     assert.equal(second.selected_product_unchanged, true);
   } finally { console.info = originalLog; }
 });

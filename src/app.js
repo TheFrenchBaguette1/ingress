@@ -167,7 +167,9 @@ function skyFootprint(target, fovArcmin) {
   const ra0 = target.raDeg * Math.PI / 180;
   const dec0 = target.decDeg * Math.PI / 180;
   const half = fovArcmin / 120 * Math.PI / 180;
-  return [[half, half], [-half, half], [-half, -half], [half, -half]].map(([xi, eta]) => {
+  // Same corner order as the saved grid: bottom-left, bottom-right,
+  // top-right, top-left in science-array coordinates.
+  return [[half, -half], [-half, -half], [-half, half], [half, half]].map(([xi, eta]) => {
     const rho = Math.hypot(xi, eta);
     const c = Math.atan(rho);
     const dec = Math.asin(Math.cos(c) * Math.sin(dec0) + eta * Math.sin(c) * Math.cos(dec0) / rho);
@@ -206,13 +208,13 @@ function frameAudit(patch, frame, fov) {
 }
 function logFovTransition(beforePatch, beforeFrame, beforeFov, afterPatch, afterFrame, afterFov) {
   if (beforePatch?.source !== 'real') return;
-  console.info('[Ingress] Field-of-view zoom, same selected exposures', {
+  console.info('[Ingress] Field-of-view zoom, same selected exposures', JSON.stringify({
     before: frameAudit(beforePatch, beforeFrame, beforeFov),
     after: frameAudit(afterPatch, afterFrame, afterFov),
     timeline_frame_count_before: beforePatch.frames.length,
     timeline_frame_count_after: afterPatch.frames.length,
     selected_product_unchanged: beforeFrame?.sourceUrl === afterFrame?.sourceUrl,
-  });
+  }));
 }
 function settleFrame() {
   const frame = currentFrame();
