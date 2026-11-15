@@ -428,8 +428,13 @@ def load_photometry_inputs(source_url, ra_deg, dec_deg, *, timeout_seconds=25):
             native = _read_s3_stamp(source_url, coord, started + timeout_seconds * 0.55)
         except PhotometryInputUnavailable:
             raise
-        except _FIT_IO_ERRORS:
-            native = _read_cutout_stamp(source_url, coord, started + timeout_seconds * 0.8)
+        except _FIT_IO_ERRORS as s3_error:
+            try:
+                native = _read_cutout_stamp(source_url, coord, started + timeout_seconds * 0.8)
+            except PhotometryInputUnavailable:
+                raise
+            except _FIT_IO_ERRORS as cutout_error:
+                raise ParentReadUnavailable(f"S3: {s3_error} | IRSA: {cutout_error}") from cutout_error
         psf, target_xy = _psf_stamp(native)
     except PhotometryInputUnavailable:
         raise

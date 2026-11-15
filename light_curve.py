@@ -25,7 +25,7 @@ MAX_WORKERS = 2
 MAX_ACTIVE_CURVES = 8
 MAX_CURVES = 24
 MAX_MEASUREMENTS = 4096
-EXPOSURE_TIMEOUT_SECONDS = 20
+EXPOSURE_TIMEOUT_SECONDS = 32
 ALGORITHM_VERSION = "fixed-epsf-v1"
 MJD_EPOCH = date(1858, 11, 17)
 RETRYABLE = frozenset({"archive_unavailable", "calibration_unavailable", "measurement_failed"})
@@ -180,8 +180,8 @@ def _run(curve, exposure):
     except (PhotometryExcluded, PhotometryInputUnavailable) as error:
         result = None, error.code
         if error.code in RETRYABLE:
-            logging.info("Light curve skipped %s (%s): %s", exposure.product_id, error.code,
-                         error.__cause__ or error)
+            logging.warning("Light curve skipped %s (%s): %s", exposure.product_id, error.code,
+                            error.__cause__ or error)
     except Exception:
         logging.exception("Light curve measurement failed for %s", exposure.product_id)
         result = None, "measurement_failed"
