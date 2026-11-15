@@ -378,7 +378,9 @@ function readForm(form) {
   state.dateError = (state.from && !validDate(state.from) || state.to && !validDate(state.to)) ? 'Enter valid dates.' : '';
   if (!coords.isValid || state.dateError) { render(); (state.raError ? app.querySelector('[name="ra"]') : state.decError ? app.querySelector('[name="dec"]') : null)?.focus(); return; }
   state.ra = ra; state.dec = dec; state.headerRa = null; state.headerDec = null;
-  if ([state.ra, state.dec, state.from, state.to].join('|') !== previousQuery) state.activeDateId = '';
+  const sameQuery = [state.ra, state.dec, state.from, state.to].join('|') === previousQuery;
+  if (!sameQuery) state.activeDateId = '';
+  if (sameQuery && state.view === 'viewer' && !state.recovery) { syncUrl(); render(); return; }
   loadPatch();
 }
 async function showSavedRealExample() {
