@@ -37,4 +37,10 @@ The flipbook uses Henry’s playable-frame rule. An exposure can play when its a
 
 The per-collection search and FITS range reads are based on [Henry Lin’s Ingress backend](https://github.com/henrylin1039/Ingress/tree/ab96fafea21f57dd54f91c741615a1b33eb787c6/backend). Ingress retains the team viewer’s progressive API, anchored zoom, and floating-point data handling.
 
+## Measure a star
+
+Click a star in a loaded image to measure that position, or select **Light curve** to measure at the crosshair. Select an infrared channel to compare flux density over time. Each point shows an individual exposure with a 1σ error bar and opens that exposure in the viewer. **Measure again** includes exposures that finished loading in the meantime. The click-to-measure interaction was inspired by [Henry Lin’s Ingress viewer](https://github.com/henrylin1039/Ingress/commit/c49f898c0fa9e6bf755e10d683fc3fc495a19985).
+
+Ingress measures a fixed position in the native calibrated DR1 and QR3 Level 2 images. It fits an isolated point source and local background using the exposure’s effective PSF, pixel variance, and quality flags. Saturated, masked, and poorly fitted cores are reported as exclusions. Error bars combine statistical uncertainty and the archive’s 3% scatter term. The variability test uses comparable passbands across at least three UTC days. [SPHEREx Explanatory Supplement](https://irsa.ipac.caltech.edu/data/SPHEREx/docs/SPHEREx_Expsupp.pdf)
+
 See [the data contract](docs/data-contract.md) for the flipbook API, legacy routes, and browser data model.

@@ -220,6 +220,20 @@ def get_flipbook(job_id):
         return _snapshot(job)
 
 
+def get_flipbook_exposures(job_id):
+    """Read the target and the real parents already published to the viewer."""
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return None
+        _jobs.move_to_end(job_id)
+        frames = tuple(
+            frame for entry in job.bands.values()
+            for frame in (entry.get("manifest") or {}).get("frames", ())
+        )
+        return job.request, frames
+
+
 def request_flipbook_band(job_id, band, *, refresh=False):
     if band not in BANDS and band != "all":
         raise ValueError("Unknown SPHEREx detector band.")

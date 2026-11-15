@@ -63,8 +63,17 @@ def _bucket_product(source_url):
 
 
 class _RangeReader:
-    def __init__(self, source_url, deadline):
-        self.url = _bucket_product(source_url)
+    def __init__(self, source_url, deadline, *, calibration=False):
+        if calibration:
+            segments = source_url.split("/")
+            if (len(segments) < 3 or segments[0] not in {"dr1", "qr3"}
+                    or segments[1] not in {"spectral_wcs", "spectral_channels", "solid_angle_pixel_map"}
+                    or not all(_PATH_SEGMENT.fullmatch(part) for part in segments)
+                    or not segments[-1].endswith(".fits")):
+                raise ParentReadUnavailable("The archive calibration path is invalid.")
+            self.url = S3_ROOT + source_url
+        else:
+            self.url = _bucket_product(source_url)
         self.deadline = deadline
         self.size = None
         self.etag = None
@@ -159,8 +168,8 @@ def _header(reader, start, initial=b"", *, first_read=5 * FITS_BLOCK):
         buf += reader.read(start + len(buf), start + min(MAX_HEADER, len(buf) + extra))
 
 
-def _flag_rows(reader, start, nx, ny, y0, y1):
-    hdr, table, _, prefix = _header(reader, start, first_read=12 * FITS_BLOCK)
+def _flag_rows(reader, start, nx, ny, y0, y1, *, layout=None):
+    hdr, table, _, prefix = layout or _header(reader, start, first_read=12 * FITS_BLOCK)
     if (hdr.get("EXTNAME") != "FLAGS" or hdr.get("XTENSION", "").strip() != "BINTABLE"
             or hdr.get("BITPIX") != 8 or hdr.get("NAXIS") != 2 or hdr.get("ZIMAGE") is not True
             or hdr.get("ZNAXIS") != 2 or hdr.get("ZBITPIX") != 32

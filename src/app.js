@@ -4,6 +4,10 @@ import {
   waitForFlipbookUpdate, flipbookBandPatch,
 } from './data.js';
 import { homeStory, heroArt, heroOrnaments } from './story.js';
+import {
+  imagePositionToSky, lightCurveChannelKey, lightCurveContents, readLightCurve,
+  skyToImagePosition, startLightCurve, tangentPlaneToSky,
+} from './light-curve.js';
 
 const app = document.querySelector('#app');
 const staticPreview = document.querySelector('meta[name="ingress-static-preview"]')?.getAttribute?.('content') === 'true';
@@ -57,6 +61,8 @@ const state = {
   prepared: null,
   recovery: null,
   sampleFallback: null,
+  lightCurve: null,
+  lightCurveTarget: null,
 };
 let playbackTimer = null;
 let renderedFrames = [];
@@ -202,18 +208,12 @@ function currentFrame() {
 function skyFootprint(target, fovArcmin) {
   // The backend uses a north-up/east-left RA---TAN/DEC--TAN output grid.
   // Evaluate its four field-edge corners for locally cropped zooms too.
-  const ra0 = target.raDeg * Math.PI / 180;
-  const dec0 = target.decDeg * Math.PI / 180;
   const half = fovArcmin / 120 * Math.PI / 180;
   // Same corner order as the saved grid: bottom-left, bottom-right,
   // top-right, top-left in science-array coordinates.
   return [[half, -half], [-half, -half], [-half, half], [half, half]].map(([xi, eta]) => {
-    const rho = Math.hypot(xi, eta);
-    const c = Math.atan(rho);
-    const dec = Math.asin(Math.cos(c) * Math.sin(dec0) + eta * Math.sin(c) * Math.cos(dec0) / rho);
-    const ra = ra0 + Math.atan2(xi * Math.sin(c), rho * Math.cos(dec0) * Math.cos(c) - eta * Math.sin(dec0) * Math.sin(c));
-    return { ra_deg: Number(((ra * 180 / Math.PI + 360) % 360).toFixed(9)),
-      dec_deg: Number((dec * 180 / Math.PI).toFixed(9)) };
+    const sky = tangentPlaneToSky(target, xi, eta);
+    return { ra_deg: Number(sky.raDeg.toFixed(9)), dec_deg: Number(sky.decDeg.toFixed(9)) };
   });
 }
 function displayedDimensions(patch, fov) {
@@ -523,13 +523,16 @@ function imageStage(frame, band, index, frames) {
   const zoom = Math.max(1, (patch.baseFovArcmin || state.fov) / state.fov);
   const pixelScale = patch.pixelScaleArcsec;
   const scaleLength = state.fov >= 12 ? 5 : state.fov >= 6 ? 2 : 1;
+  const canPick = lightCurveEnabled();
+  const marker = lightCurveMarkerPosition();
   return `<div class="stage-top"><div><span class="frame-date">${esc(presentation.dateLabel)}</span><span class="frame-ordinal">${esc(presentation.ordinal)}</span></div>
     <span class="wavelength-chip" style="--band-color:${presentation.color}"><i class="color-chip"></i><span data-frame-wavelength>${esc(presentation.wavelength)}</span></span></div>
     <div class="image-view" aria-label="${esc(presentation.imageLabel)}">
-      <div class="image-layer" style="--zoom:${zoom}"><img data-frame-image src="${esc(frame.previewUrl || frame.imageUrl)}" alt="${esc(presentation.imageAlt)}" /></div><div class="crosshair" title="Entered coordinates"></div>
+      <div class="image-layer" style="--zoom:${zoom}"><img data-frame-image src="${esc(frame.previewUrl || frame.imageUrl)}" alt="${esc(presentation.imageAlt)}" ${canPick ? 'data-action="pick-light-curve"' : ''} /></div><div class="crosshair" title="Entered coordinates"></div>
+      ${canPick ? `<div class="light-curve-marker-sky" data-light-curve-marker aria-hidden="true" ${marker ? `style="left:${marker.x * 100}%;top:${marker.y * 100}%"` : 'hidden'}></div>` : ''}
       <div class="compass"><span>N</span><span>↑</span><span>E ←</span></div>
       ${pixelScale ? `<div class="scale-bar" style="--scale-width:${(scaleLength / state.fov * 100).toFixed(1)}%">${scaleLength}′</div>` : ''}<div class="fov-label">${state.fov}′ wide</div>
-    </div><div class="image-caption"><span>Crosshair marks the entered coordinates${pixelScale ? ` · 1 science pixel ≈ ${esc(pixelScale)}″ · display zoom uses nearest-neighbor resampling` : ''}</span><a href="#frame-details-desktop" data-action="show-details">Source and details</a></div>`;
+    </div><div class="image-caption"><span>${canPick ? 'Click a star to measure its brightness.' : 'Crosshair marks the entered coordinates'}${pixelScale ? ` · 1 science pixel ≈ ${esc(pixelScale)}″ · display zoom uses nearest-neighbor resampling` : ''}</span><a href="#frame-details-desktop" data-action="show-details">Source and details</a></div>`;
 }
 function wavelengthComparisonNote(frames) {
   if (frames.length < 2) return '';
@@ -751,6 +754,138 @@ function flipbookNotice() {
   }
   return `<p class="notice" role="status" data-flipbook-progress>${esc(message)}</p>`;
 }
+function lightCurveEnabled() {
+  return Boolean(activeFlipbook?.jobId && state.prepared === activeFlipbook && currentFrame());
+}
+function lightCurveMarkerPosition() {
+  const target = state.lightCurveTarget;
+  return target && skyToImagePosition(state.patch.target, state.fov, target);
+}
+function lightCurveMarkup() {
+  return lightCurveContents(state.lightCurve, {
+    enabled: lightCurveEnabled(),
+    currentProduct: currentFrame()?.productId,
+    target: state.lightCurveTarget,
+    esc,
+  });
+}
+function lightCurveFocus(focused) {
+  const { range, action } = focused?.dataset || {};
+  if (['light-curve-channel', 'light-curve-exposure'].includes(range)) return `[data-range="${range}"]`;
+  if (['measure-light-curve', 'close-light-curve', 'measure-crosshair'].includes(action)) return `[data-action="${action}"]`;
+  return null;
+}
+function paintLightCurve() {
+  const panel = app.querySelector('[data-light-curve]');
+  if (!panel) { render(); return; }
+  const focus = lightCurveFocus(document.activeElement);
+  const openDetails = ['.light-curve-exclusions', '.light-curve-spectrum'].filter(selector => panel.querySelector(selector)?.open);
+  panel.innerHTML = lightCurveMarkup();
+  for (const selector of openDetails) {
+    const details = panel.querySelector(selector);
+    if (details) details.open = true;
+  }
+  const marker = app.querySelector('[data-light-curve-marker]');
+  if (marker) {
+    const position = lightCurveMarkerPosition();
+    marker.hidden = !position;
+    if (position) {
+      marker.style.left = `${position.x * 100}%`;
+      marker.style.top = `${position.y * 100}%`;
+    }
+  }
+  if (focus) (panel.querySelector(focus) || panel.querySelector('button'))?.focus({ preventScroll: true });
+}
+function cancelLightCurve() {
+  state.lightCurve?.controller.abort();
+  state.lightCurve = null;
+}
+async function measureLightCurve({ replace = false } = {}) {
+  const group = activeFlipbook;
+  if (!lightCurveEnabled() || state.view !== 'viewer' || !replace && state.lightCurve?.measuring) return;
+  const curve = {
+    controller: new AbortController(), measuring: true,
+    channel: replace ? null : state.lightCurve?.channel,
+    product: replace ? null : state.lightCurve?.product,
+  };
+  cancelLightCurve();
+  state.lightCurve = curve;
+  paintLightCurve();
+  const { signal } = curve.controller;
+  try {
+    let payload = await startLightCurve(group.jobId, {
+      from: state.from, to: state.to, target: state.lightCurveTarget, signal,
+      onBusy: () => {
+        if (state.lightCurve !== curve || curve.waiting) return;
+        curve.waiting = true;
+        paintLightCurve();
+      },
+    });
+    while (state.lightCurve === curve && !signal.aborted) {
+      const changed = curve.payload?.processed_count !== payload.processed_count || curve.payload?.status !== payload.status;
+      curve.payload = payload;
+      curve.measuring = payload.status !== 'complete';
+      if (changed) paintLightCurve();
+      if (!curve.measuring) return;
+      await waitForFlipbookUpdate(signal);
+      payload = await readLightCurve(payload.light_curve_id, signal);
+    }
+  } catch (error) {
+    if (state.lightCurve !== curve || signal.aborted) return;
+    curve.measuring = false;
+    curve.error = error.message || 'The light curve service is temporarily unavailable.';
+    paintLightCurve();
+  }
+}
+function pickLightCurveTarget(image, event) {
+  if (!lightCurveEnabled()) return;
+  const view = image.closest('.image-view');
+  if (!view?.clientWidth || !view.clientHeight) return;
+  const rect = view.getBoundingClientRect();
+  const x = (event.clientX - rect.left - view.clientLeft) / view.clientWidth;
+  const y = (event.clientY - rect.top - view.clientTop) / view.clientHeight;
+  if (!(x >= 0 && x <= 1 && y >= 0 && y <= 1)) return;
+  state.lightCurveTarget = imagePositionToSky(state.patch.target, state.fov, x, y);
+  stopPlayback();
+  updatePlaybackButton();
+  void measureLightCurve({ replace: true });
+}
+function openLightCurveExposure(product, fromPreviewUpdate = false) {
+  const curve = state.lightCurve;
+  const group = activeFlipbook;
+  const point = curve?.payload?.points.find(item => item.product_id === product);
+  if (!point || !group || state.prepared !== group) return;
+  curve.channel = lightCurveChannelKey(point);
+  curve.product = product;
+  curve.pendingProduct = null;
+  curve.frameNotice = null;
+
+  const frameMatches = frame => frame.productId === product && inRange(frame.dateId);
+  let index = renderedFrames.findIndex(frameMatches);
+  if (index < 0) {
+    const destination = ['all', Number(point.detector.slice(1))].find(band =>
+      group.patches.get(band)?.frames.some(frameMatches));
+    if (destination != null) {
+      void chooseLiveBand(group, destination);
+      index = renderedFrames.findIndex(frameMatches);
+    }
+  }
+  if (index >= 0) {
+    stopPlayback();
+    selectFrame(index);
+  } else {
+    const preview = group.records.get(Number(point.detector.slice(1)))?.patch.frames.find(frameMatches);
+    const pending = preview && unreadyFlipbookPreviews(group, preview.band).includes(preview);
+    if (pending || !preview && group.jobStatus === 'running') {
+      curve.pendingProduct = product;
+      curve.frameNotice = 'Waiting for this exposure’s preview.';
+    } else {
+      curve.frameNotice = 'The exact exposure preview is unavailable in this view.';
+    }
+    if (fromPreviewUpdate && curve.pendingProduct) return;
+  }
+  paintLightCurve();
+}
 function viewer() {
   const patch = state.patch;
   const frames = visibleFrames();
@@ -773,6 +908,7 @@ function viewer() {
     ${flipbookNotice()}
     ${frame ? imageStage(frame, band, frames.indexOf(frame), frames) : `<div class="state-card" role="status"><h2>No loaded frames in this range</h2>${staticPreview ? '' : '<p>The archive may have other observations.</p><button class="pill-button" data-action="search-date-range">Search this date range</button>'}<button class="pill-button" data-action="clear-range">All dates</button></div>`}
     ${timeline(frames, band)}
+    <div class="light-curve-slot" data-light-curve>${lightCurveMarkup()}</div>
     <div class="mobile-actions"><button class="soft-button" type="button" data-action="open-bands">Wavelength · ${esc(rangeLabel(band))}</button><button class="soft-button" type="button" data-action="open-details">Details &amp; width</button></div>
     </div></div>${settingsPanel()}</main>${state.drawer ? `<dialog class="mobile-drawer" aria-label="${state.drawer === 'bands' ? 'Wavelength settings' : 'Frame details and field of view'}"><div class="drawer-head"><h2>${state.drawer === 'bands' ? 'Wavelength' : 'Details'}</h2><button class="soft-button" type="button" data-action="close-drawer" aria-label="Close panel">Close ✕</button></div>${settingsPanel(state.drawer, 'mobile')}</dialog>` : ''}`;
 }
@@ -785,7 +921,8 @@ function render() {
   if (state.view !== 'viewer') renderedFrames = [];
   const contents = state.view === 'home' ? home() : state.view === 'viewer' ? viewer() : statusCard(state.view);
   app.innerHTML = `<div class="app-shell ${state.view === 'home' ? 'home-shell' : ''}">${header()}${contents}${footer()}</div>`;
-  if (playbackFocus) app.querySelector(playbackFocus)?.focus({ preventScroll: true });
+  const focus = playbackFocus || lightCurveFocus(focused);
+  if (focus) app.querySelector(focus)?.focus({ preventScroll: true });
   if (state.drawer) {
     const dialog = app.querySelector('.mobile-drawer');
     if (dialog) { dialog.showModal(); dialog.querySelector('[data-action="close-drawer"]')?.focus(); }
@@ -995,6 +1132,8 @@ async function preparePatchSet(coords, restoreSequenceId, signal, request, force
 }
 
 function stopFlipbook() {
+  cancelLightCurve();
+  state.lightCurveTarget = null;
   const group = activeFlipbook;
   if (!group) return;
   activeFlipbook = null;
@@ -1189,6 +1328,9 @@ function presentFlipbook(group) {
   if (changed || group.lastPaint !== stateKey) {
     group.lastPaint = stateKey;
     render();
+    if (state.lightCurve?.pendingProduct && state.prepared === group) {
+      openLightCurveExposure(state.lightCurve.pendingProduct, true);
+    }
   } else {
     // A progress poll without fresh images only updates the status sentence.
     const status = app.querySelector('[data-flipbook-progress]');
@@ -1634,6 +1776,7 @@ function retrySameParentPixels() {
 }
 function changeRange(key, value) {
   if (value && !validDate(value)) return;
+  if (value !== state[key]) cancelLightCurve();
   state[key] = value;
   if (state.from && state.to && state.from > state.to) [state.from, state.to] = [state.to, state.from];
   stopPlayback();
@@ -1658,6 +1801,14 @@ app.addEventListener('change', event => {
   if (event.target.dataset.range === 'from' || event.target.dataset.range === 'to') changeRange(event.target.dataset.range, event.target.value);
   if (event.target.dataset.range === 'fov') setFov(Number(event.target.value), true);
   if (event.target.dataset.range === 'frame') syncUrl();
+  if (event.target.dataset.range === 'light-curve-channel' && state.lightCurve) {
+    state.lightCurve.channel = event.target.value;
+    state.lightCurve.product = null;
+    state.lightCurve.pendingProduct = null;
+    state.lightCurve.frameNotice = null;
+    paintLightCurve();
+  }
+  if (event.target.dataset.range === 'light-curve-exposure') openLightCurveExposure(event.target.value);
   if (event.target.dataset.range === 'playback-rate') {
     const rate = Number(event.target.value);
     if (PLAYBACK_RATES.includes(rate)) {
@@ -1709,6 +1860,7 @@ app.addEventListener('click', event => {
   else if (action === 'cancel') resetHome();
   else if (action === 'clear-and-retry') { state.from = ''; state.to = ''; loadPatch(); }
   else if (action === 'clear-range') {
+    cancelLightCurve();
     state.from = ''; state.to = ''; stopPlayback();
     if (rangeNeedsRefresh()) loadPatch(); else { settleFrame(); syncUrl(); render(); }
   }
@@ -1719,6 +1871,11 @@ app.addEventListener('click', event => {
     stopPlayback();
     selectFrame(renderedFrames.findIndex(frame => frame.dateId === target.dataset.date));
   }
+  else if (action === 'measure-light-curve') void measureLightCurve();
+  else if (action === 'pick-light-curve') pickLightCurveTarget(target, event);
+  else if (action === 'measure-crosshair') { state.lightCurveTarget = null; void measureLightCurve({ replace: true }); }
+  else if (action === 'close-light-curve') { cancelLightCurve(); paintLightCurve(); }
+  else if (action === 'light-curve-point') openLightCurveExposure(target.dataset.product);
   else if (action === 'band') setBand(target.dataset.band === 'all' ? 'all' : Number(target.dataset.band));
   else if (action === 'fov') setFov(Number(target.dataset.fov));
   else if (action === 'fov-custom') { state.customFov = true; render(); }

@@ -13,7 +13,10 @@ from fastapi.staticfiles import StaticFiles
 
 import config
 from archive import ArchiveUnavailable
-from flipbook import FlipbookBusy, FlipbookRequest, get_flipbook, request_flipbook_band, start_flipbook
+from flipbook import (
+    FlipbookBusy, FlipbookRequest, get_flipbook, get_flipbook_exposures, request_flipbook_band, start_flipbook,
+)
+from light_curve import LightCurveBusy, LightCurveRequest, get_light_curve, start_light_curve
 from sequence import SequenceRequest, build_sequence
 from sequence_disk_cache import (
     PARTIAL_TTL_SECONDS, cacheable_sequence, find_saved_sequence, intact_saved_frames,
@@ -202,6 +205,30 @@ def select_flipbook_band(job_id: str, band: str, refresh: bool = False):
         ) from error
     if result is None:
         raise HTTPException(status_code=404, detail="Flipbook search has expired. Start it again.")
+    return result
+
+
+@router.post("/flipbook/{job_id}/light-curve")
+def create_light_curve(job_id: str, request: LightCurveRequest):
+    selection = get_flipbook_exposures(job_id) if re.fullmatch(r"[a-f0-9]{32}", job_id) else None
+    if selection is None:
+        raise HTTPException(status_code=404, detail="Flipbook search has expired. Start it again.")
+    try:
+        return start_light_curve(*selection, request)
+    except LightCurveBusy as error:
+        raise HTTPException(
+            status_code=503, detail={"code": "light_curve_busy", "message": str(error)},
+            headers={"Retry-After": "3"},
+        ) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.get("/light-curve/{curve_id}")
+def light_curve_status(curve_id: str):
+    result = get_light_curve(curve_id) if re.fullmatch(r"[a-f0-9]{32}", curve_id) else None
+    if result is None:
+        raise HTTPException(status_code=404, detail="This light curve has expired. Measure again to reload it.")
     return result
 
 

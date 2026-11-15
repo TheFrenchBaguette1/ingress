@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
+import { imagePositionToSky, skyToImagePosition } from '../src/light-curve.js';
 
 const jobId = 'a'.repeat(32);
 const sequence4 = 'b'.repeat(32);
@@ -58,12 +59,165 @@ async function mount(url, fetchImpl) {
   globalThis.window = { addEventListener() {} };
   globalThis.fetch = fetchImpl;
   await import(`../src/app.js?flipbook=${Math.random()}`);
-  const click = (action, extra = {}, form = null) => listeners.click.forEach(listener => listener({ target: {
-    closest: () => ({ dataset: { action, ...extra }, tagName: 'BUTTON', closest: () => form }),
+  const click = (action, extra = {}, element = null, pointer = {}) => listeners.click.forEach(listener => listener({ ...pointer, target: {
+    closest: () => ({ dataset: { action, ...extra }, tagName: 'BUTTON', closest: () => element }),
     matches: () => false,
   } }));
-  return { app, click };
+  const change = (range, value) => listeners.change.forEach(listener => listener({ target: {
+    dataset: { range }, value,
+  } }));
+  return { app, click, change };
 }
+
+const curveId = 'd'.repeat(32);
+const firstCurveDate = '2025-06-04 06:30:00.000';
+const secondCurveDate = '2025-06-05 06:30:00.000';
+const curveFrames = {
+  D1: { status: 'ready', manifest: manifest('D1', sequence1, [firstCurveDate, secondCurveDate]) },
+  D4: { status: 'ready', manifest: manifest('D4', sequence4, [firstCurveDate, secondCurveDate]) },
+};
+
+function curvePoint(product, detector, day, flux) {
+  return {
+    product_id: product, detector, channel: 3, time_utc: `2025-06-0${day}T06:31:00Z`,
+    time_mjd: 60826 + day, flux_ujy: flux, error_ujy: 12.4, stat_error_ujy: 12,
+    systematic_error_ujy: 3.1, wavelength_um: detector === 'D4' ? 2.63 : .84, bandwidth_um: .025,
+    fit_quality: 0.84, psf_coverage: .99,
+  };
+}
+
+function curveResponse(status, points, exclusions = {}) {
+  return new Response(JSON.stringify({
+    light_curve_id: curveId, status, total_count: 4,
+    processed_count: status === 'complete' ? 4 : points.length, points, exclusions,
+    channels: ['D4', 'D1'].filter(detector => points.some(point => point.detector === detector)).map(detector => ({
+      detector, channel: 3, wavelength_um: detector === 'D4' ? 2.64 : .85,
+      bandwidth_um: .025, day_count: detector === 'D4' ? 4 : 1,
+      variability: detector === 'D4' ? 'candidate' : 'insufficient_observations',
+      p_value: detector === 'D4' ? .008 : null,
+    })),
+  }));
+}
+
+test('the light curve loads only on demand, plots uncertainty and opens the exact exposure across bands', async () => {
+  const calls = [];
+  const firstPoint = curvePoint('D4-0.fits', 'D4', 4, -42);
+  const selectedPoint = curvePoint('D1-1.fits', 'D1', 5, 103);
+  const { app, click, change } = await mount(base, async (path, options) => {
+    calls.push(path);
+    if (path === '/api/flipbook') return payload('complete', 1, curveFrames);
+    if (path.endsWith('/light-curve')) {
+      assert.equal(options.method, 'POST');
+      assert.deepEqual(JSON.parse(options.body), { start_date: '2025-05-01', end_date: '2026-11-07' });
+      return curveResponse('running', [firstPoint]);
+    }
+    assert.equal(path, `/api/light-curve/${curveId}`);
+    return curveResponse('complete', [firstPoint, selectedPoint], { saturated_core: 2 });
+  });
+  try {
+    await eventually(() => /data-action="measure-light-curve"/.test(app.innerHTML));
+    assert.deepEqual(calls, ['/api/flipbook']);
+    click('band', { band: '4' });
+    click('measure-light-curve');
+    await eventually(() => /Preliminary/.test(app.innerHTML));
+    assert.match(app.innerHTML, /−42|\-42/);
+    assert.match(app.innerHTML, /Flux density \(µJy\)/);
+    assert.match(app.innerHTML, /Observation time \(UTC\)/);
+    assert.match(app.innerHTML, /± 12\.4 µJy \(1σ\)/);
+    await eventually(() => /Candidate variability/.test(app.innerHTML));
+    assert.match(app.innerHTML, /4 of 4 loaded exposures checked · 2 measured · 2 skipped/);
+    assert.match(app.innerHTML, /saturated star core/);
+    assert.match(app.innerHTML, /Spectrum across observation dates/);
+    change('light-curve-channel', 'D1:3');
+    assert.match(app.innerHTML, /Too few comparable observations/);
+    click('light-curve-point', { product: 'D1-1.fits' });
+    assert.match(app.innerHTML, /data-frame-image src="\/outputs\/c{32}\/frame_001\.png"/);
+    assert.match(app.innerHTML, /103 ± 12\.4 µJy/);
+    assert.match(app.innerHTML, /Measure again/);
+    assert.deepEqual(calls, ['/api/flipbook', `/api/flipbook/${jobId}/light-curve`, `/api/light-curve/${curveId}`]);
+  } finally {
+    click('home');
+  }
+});
+
+test('clicking the displayed image measures that sky coordinate and keeps its marker tied to the zoom', async () => {
+  const requested = [];
+  const { app, click } = await mount(`${base}&fov=20`, async (path, options) => {
+    if (path === '/api/flipbook') return payload('complete', 1, curveFrames);
+    assert.equal(path, `/api/flipbook/${jobId}/light-curve`);
+    requested.push(JSON.parse(options.body));
+    return curveResponse('complete', [], { saturation: 4 });
+  });
+  const viewport = { clientWidth: 400, clientHeight: 400, clientLeft: 1, clientTop: 1,
+    getBoundingClientRect: () => ({ left: 10, top: 30 }) };
+  const location = { raDeg: 25, decDeg: -15 };
+  const previousConsoleInfo = console.info;
+  console.info = () => {};
+  try {
+    await eventually(() => /data-action="pick-light-curve"/.test(app.innerHTML));
+    assert.deepEqual(requested, []);
+    click('pick-light-curve', {}, viewport, { clientX: 131, clientY: 191 });
+    await eventually(() => /4 of 4 loaded exposures checked/.test(app.innerHTML));
+    const target = imagePositionToSky(location, 20, .30, .40);
+    assert.deepEqual(requested[0], {
+      start_date: '2025-05-01', end_date: '2026-11-07', ra_deg: target.raDeg, dec_deg: target.decDeg,
+    });
+    assert.match(app.innerHTML, /data-light-curve-marker aria-hidden="true" style="left:/);
+    assert.match(app.innerHTML, /Selected star · RA/);
+    click('fov', { fov: '5' });
+    assert.match(app.innerHTML, /data-light-curve-marker aria-hidden="true" hidden/);
+    assert.equal(requested.length, 1);
+    click('fov', { fov: '20' });
+    assert.match(app.innerHTML, /data-light-curve-marker aria-hidden="true" style="left:/);
+    click('measure-crosshair');
+    await eventually(() => /4 of 4 loaded exposures checked/.test(app.innerHTML));
+    assert.deepEqual(requested[1], { start_date: '2025-05-01', end_date: '2026-11-07' });
+    assert.match(app.innerHTML, /Measuring the star at the crosshair/);
+    assert.match(app.innerHTML, /data-light-curve-marker aria-hidden="true" hidden/);
+  } finally {
+    console.info = previousConsoleInfo;
+    click('home');
+  }
+});
+
+test('sky projection preserves east-left and north-up above a high-declination field and wraps RA', () => {
+  const center = { raDeg: 359.99, decDeg: 75 };
+  const east = imagePositionToSky(center, 20, .2, .35);
+  assert.ok(east.raDeg < 1);
+  assert.ok(east.decDeg > 75);
+  const position = skyToImagePosition(center, 20, east);
+  assert.ok(Math.abs(position.x - .2) < 1e-10);
+  assert.ok(Math.abs(position.y - .35) < 1e-10);
+  assert.equal(skyToImagePosition(center, 5, east), null);
+  const pole = { raDeg: 45, decDeg: 90 };
+  const nearPole = imagePositionToSky(pole, 20, .9, .1);
+  const back = skyToImagePosition(pole, 20, nearPole);
+  assert.ok(Math.abs(back.x - .9) < 1e-10);
+  assert.ok(Math.abs(back.y - .1) < 1e-10);
+});
+
+test('changing the date range aborts an old light curve and discards a late response', async () => {
+  let release, signal;
+  const { app, click, change } = await mount(base, async (path, options) => {
+    if (path === '/api/flipbook') return payload('complete', 1, curveFrames);
+    assert.equal(path, `/api/flipbook/${jobId}/light-curve`);
+    signal = options.signal;
+    return new Promise(resolve => { release = resolve; });
+  });
+  try {
+    await eventually(() => /data-action="measure-light-curve"/.test(app.innerHTML));
+    click('measure-light-curve');
+    await eventually(() => /Starting measurements/.test(app.innerHTML));
+    change('to', '2025-06-04');
+    assert.ok(signal.aborted);
+    release(curveResponse('complete', []));
+    await delay(40);
+    assert.doesNotMatch(app.innerHTML, /light-curve-card|No usable measurements/);
+    assert.match(app.innerHTML, /data-action="measure-light-curve"/);
+  } finally {
+    click('home');
+  }
+});
 
 test('a known target opens an archive search with the entered dates in one click', async () => {
   const expected = { ra_deg: 331.096, dec_deg: -56.801, start_date: '2025-06-01', end_date: '2025-07-01', band: 'all' };
