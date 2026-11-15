@@ -18,6 +18,7 @@ from reproject import reproject_interp
 
 import config
 from archive import load_cutout, search_observations
+from archive_cache import cached_search_observations
 
 
 # ---------- Request validation ----------
@@ -129,6 +130,7 @@ def build_sequence(request):
 
     # Search a circle enclosing the requested square field.
     search_radius_arcsec = request.fov_arcmin * 60 / sqrt(2)
+    deadline = monotonic() + config.MAX_BUILD_SECONDS
 
     # The user may enter dates before launch or in the future. Preserve that
     # requested interval in the manifest, but avoid searching empty years.
@@ -143,12 +145,13 @@ def build_sequence(request):
         )
     else:
         print("Searching the requested sky region...", flush=True)
-        results = search_observations(
+        results = cached_search_observations(
             coord,
             search_radius_arcsec,
             config.COLLECTIONS,
             Time(available_start.isoformat(), scale="utc"),
             Time(available_end_exclusive.isoformat(), scale="utc"),
+            fetch=search_observations,
         )
 
     times = np.asarray(results["t_min"], dtype=float)
@@ -193,7 +196,6 @@ def build_sequence(request):
         [float(row["t_min"]) for row in unique_candidates],
         min(total_candidates, config.MAX_CUTOUT_ATTEMPTS),
     )
-    deadline = monotonic() + config.MAX_BUILD_SECONDS
     attempted_count = 0
 
     for candidate_index in plan:

@@ -13,7 +13,7 @@ from astropy.time import Time
 
 import config
 from api import create_sequence, sequence_cache
-from archive import search_observations
+from archive import ArchiveUnavailable, _TimedSession, search_observations
 from sequence import SequenceRequest, build_sequence, time_spread_indexes
 
 
@@ -24,7 +24,7 @@ class ArchiveTimeTests(unittest.TestCase):
         end = Time("2025-06-01", scale="utc")
         sentinel = object()
 
-        with patch("archive.Irsa.query_sia", return_value=sentinel) as query:
+        with patch("archive._BoundedIrsa.query_sia", return_value=sentinel) as query:
             result = search_observations(
                 coord, 600, ["spherex_dr1", "spherex_qr3"], start, end
             )
@@ -32,6 +32,43 @@ class ArchiveTimeTests(unittest.TestCase):
         self.assertIs(result, sentinel)
         self.assertEqual(query.call_args.kwargs["time"], (start, end))
         self.assertEqual(query.call_args.kwargs["pos"][1], 600 * u.arcsec)
+
+    def test_transient_archive_gateway_error_retries_once(self):
+        coord = SkyCoord(120, -85, unit="deg")
+        start = Time("2025-05-01", scale="utc")
+        end = Time("2025-06-01", scale="utc")
+        sentinel = object()
+        with (
+            patch("archive._BoundedIrsa.query_sia", side_effect=[
+                RuntimeError("502 Bad Gateway"), sentinel,
+            ]) as query,
+            patch("archive.sleep"),
+        ):
+            self.assertIs(search_observations(coord, 600, ["spherex_dr1"], start, end), sentinel)
+        self.assertEqual(query.call_count, 2)
+        self.assertEqual(query.call_args.kwargs["time"], (start, end))
+
+    def test_persistent_archive_failure_has_clear_error(self):
+        coord = SkyCoord(120, -85, unit="deg")
+        start = Time("2025-05-01", scale="utc")
+        end = Time("2025-06-01", scale="utc")
+        with (
+            patch("archive._BoundedIrsa.query_sia", side_effect=RuntimeError("503 Service Unavailable")) as query,
+            patch("archive.sleep"),
+            self.assertRaisesRegex(ArchiveUnavailable, "temporarily unavailable"),
+        ):
+            search_observations(coord, 600, ["spherex_dr1"], start, end)
+        self.assertEqual(query.call_count, 2)
+
+    def test_sia_session_sets_bounded_network_timeout(self):
+        session = _TimedSession()
+        session.deadline = 10_000
+        with (
+            patch("archive.monotonic", return_value=9_990),
+            patch("archive.Session.request", return_value=object()) as request,
+        ):
+            session.request("GET", "https://example.org/SIA")
+        self.assertEqual(request.call_args.kwargs["timeout"], 10)
 
     def test_sequence_search_includes_entire_last_utc_day(self):
         request = SequenceRequest(

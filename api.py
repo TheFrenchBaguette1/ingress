@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 import config
+from archive import ArchiveUnavailable
 from sequence import SequenceRequest, build_sequence
 
 
@@ -71,6 +72,10 @@ def create_sequence(request: SequenceRequest):
             if len(sequence_cache) > MAX_CACHED_SEQUENCES:
                 sequence_cache.popitem(last=False)
         return result
+
+    except ArchiveUnavailable as error:
+        logging.warning("Archive search unavailable: %s", error)
+        raise HTTPException(status_code=502, detail=str(error)) from error
 
     except Exception:
         logging.exception("Sequence generation failed.")
