@@ -1,8 +1,7 @@
 """Bounded asynchronous preparation of six actual 20′ detector sequences.
 
-One unfiltered SIA listing can serve all detectors. Every displayed frame is
-still read from its genuine archive parent FITS; unavailable bands remain
-unavailable rather than being filled with another detector or synthetic data.
+One unfiltered SIA listing can serve all detectors. Each displayed frame comes
+from an archive parent FITS product for its own detector.
 """
 
 import copy

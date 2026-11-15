@@ -33,7 +33,7 @@ INGRESS_API_ORIGIN=http://127.0.0.1:8000 npm run dev
 
 Open <http://localhost:5173>. The Node server serves the frontend, forwards `/api/sequence`, `/api/zoom`, and `/api/prepare` to Python, and forwards `/outputs/*` for generated PNG frames. `npm test` runs the frontend integration checks. Run `.venv/bin/python -m unittest discover -s test -p 'test_*.py'` for backend checks.
 
-You can run `npm run dev` without Python to explore **Try synthetic WISE 0855**. Its 18 bundled frames are invented illustrations with exaggerated motion, clearly labeled as a synthetic demo. Real observations are never replaced with demo images after an archive error.
+You can run `npm run dev` without Python to open the bundled real SPHEREx example. Searching for other observations requires the Python backend.
 
 ## How real data works
 

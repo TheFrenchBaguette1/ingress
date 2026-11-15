@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { parseCoordinates, loadBundledRealPatch, loadDemoPatch, fetchRealPatch, normalizeSequencePatch, PatchDataError, WISE_0855, retryWhileBusy } from '../src/data.js';
+import { parseCoordinates, loadBundledRealPatch, fetchRealPatch, normalizeSequencePatch, PatchDataError, retryWhileBusy } from '../src/data.js';
+
+const WISE_0855 = {
+  ra: '08h55m10.831s', dec: '-07d14m42.53s',
+  raDeg: 133.79512917, decDeg: -7.24514722,
+};
 
 test('sexagesimal and decimal coordinates agree, with bad values rejected', () => {
   const sexagesimal = parseCoordinates(WISE_0855.ra, WISE_0855.dec);
@@ -11,21 +16,6 @@ test('sexagesimal and decimal coordinates agree, with bad values rejected', () =
   assert.ok(Math.abs(sexagesimal.decDeg - decimal.decDeg) < 1e-6);
   assert.equal(parseCoordinates('25h00m00s', '0').isValid, false);
   assert.equal(parseCoordinates('08h55m10s', '-91').isValid, false);
-  assert.equal(parseCoordinates('133.80', '-7.2451').isWiseExample, false);
-});
-
-test('synthetic WISE example is locally sourced and target limited', async () => {
-  const manifest = JSON.parse(await readFile(new URL('../public/demo/frames.json', import.meta.url), 'utf8'));
-  const fetchImpl = async url => {
-    assert.equal(url, './public/demo/frames.json');
-    return new Response(JSON.stringify(manifest), { status: 200 });
-  };
-  const patch = await loadDemoPatch({ fetchImpl });
-  assert.equal(patch.source, 'synthetic');
-  assert.equal(patch.frames.length, 18);
-  assert.ok(patch.frames.every(f => f.imageUrl.startsWith('./public/demo/frames/')));
-  await assert.rejects(loadDemoPatch({ ra: '110', dec: '12', fetchImpl }),
-    error => error instanceof PatchDataError && error.code === 'demo_target_unavailable');
 });
 
 test('saved real example preserves fixed sky, band, dates, and actual source links', async () => {
@@ -44,7 +34,7 @@ test('saved real example preserves fixed sky, band, dates, and actual source lin
     frame.archiveUrl.startsWith('https://irsa.ipac.caltech.edu/')));
 
   const unsafe = structuredClone(manifest);
-  unsafe.frames[0].image_url = '/public/demo/frames/b4_2025-05-07.png';
+  unsafe.frames[0].image_url = '/public/other-example/frame_000.png';
   await assert.rejects(loadBundledRealPatch({ fetchImpl: async () =>
     new Response(JSON.stringify(unsafe), { status: 200 }) }),
   error => error.code === 'example_unavailable');

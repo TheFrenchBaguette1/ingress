@@ -104,6 +104,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const port = Number(process.env.PORT || 5173);
   createIngressServer().listen(port, () => {
     console.log(`Ingress frontend: http://localhost:${port}`);
-    if (!process.env.INGRESS_API_ORIGIN) console.log('Real-data backend not connected; the synthetic WISE demo is available.');
+    if (!process.env.INGRESS_API_ORIGIN) console.log('Archive search requires a backend. Set INGRESS_API_ORIGIN to connect.');
   });
 }

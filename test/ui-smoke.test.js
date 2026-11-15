@@ -1,8 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 
-test('example loads, date filtering stays inside the range, and errors remain explicit', async () => {
+test('the home form and old demo links search real observations only', async () => {
   const listeners = {};
   const app = {
     innerHTML: '',
@@ -12,61 +11,37 @@ test('example loads, date filtering stays inside the range, and errors remain ex
   globalThis.location = new URL('http://localhost:5173/');
   globalThis.history = { replaceState(_state, _title, url) { globalThis.location = new URL(url); } };
   globalThis.document = { querySelector() { return app; }, addEventListener() {}, hidden: false };
-  globalThis.window = { addEventListener() {} };
-  const manifest = await readFile(new URL('../public/demo/frames.json', import.meta.url), 'utf8');
+  const windowListeners = {};
+  globalThis.window = { addEventListener(type, callback) { (windowListeners[type] ||= []).push(callback); } };
   const realRequests = [];
-  const realBands = [];
   globalThis.fetch = async (url, options) => {
-    if (options?.body) {
-      const request = JSON.parse(options.body);
-      realRequests.push({ url: String(url), request });
-      realBands.push(request.band);
-    }
-    return String(url).includes('frames.json')
-    ? new Response(manifest, { status: 200 }) : new Response('Unavailable', { status: 503 });
+    assert.equal(String(url), '/api/prepare');
+    realRequests.push(JSON.parse(options.body));
+    return new Response('Unavailable', { status: 503 });
   };
   await import(`../src/app.js?smoke=${Date.now()}`);
   assert.match(app.innerHTML, /Pick a place in the sky/);
+  const removedDemoControls = /Synthetic demo|try-wise|source-demo|WISE 0855 demo/i;
+  assert.doesNotMatch(app.innerHTML, removedDemoControls);
 
-  const click = (action, extras = {}) => {
-    const event = { target: {
-      closest: () => ({ dataset: { action, ...extras }, tagName: 'BUTTON' }),
-      matches: () => false,
-    } };
-    listeners.click.forEach(listener => listener(event));
-  };
-  click('try-wise');
+  globalThis.location = new URL('http://localhost:5173/?ra=133.79512917&dec=-7.24514722&source=demo&band=6&fov=10');
+  windowListeners.popstate.forEach(listener => listener());
   await new Promise(resolve => setImmediate(resolve));
-  assert.match(app.innerHTML, /SYNTHETIC DEMO — NOT SPHEREx OBSERVATIONS/);
-  assert.match(app.innerHTML, /Showing 8 of 8 loaded frames/);
-  assert.doesNotMatch(app.innerHTML, /1 pixel ≈/);
-
-  listeners.change.forEach(listener => listener({ target: { dataset: { range: 'from' }, value: '2025-11-08' } }));
-  listeners.change.forEach(listener => listener({ target: { dataset: { range: 'to' }, value: '2025-11-08' } }));
-  assert.match(app.innerHTML, /Showing 1 of 8 loaded frames/);
-  click('band', { band: '2' });
-  assert.match(app.innerHTML, /Showing 1 of 6 loaded frames/);
-  click('band', { band: '6' });
-  assert.match(app.innerHTML, /No loaded frames at 4.42–5.00 µm in this date range/);
-  assert.doesNotMatch(app.innerHTML, /b6_2025-11-10\.png/);
-  click('clear-range');
-  assert.match(app.innerHTML, /Showing 4 of 4 loaded frames/);
-
-  click('source-real');
-  await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(realRequests.map(call => call.url), ['/api/prepare']);
-  assert.equal(realRequests[0].request.fov_arcmin, undefined); // Preparation owns the 20′ master width.
-  assert.equal(globalThis.location.searchParams.get('fov'), '5');
+  assert.equal(realRequests.length, 1);
+  assert.equal(realRequests[0].band, 'D6');
+  assert.equal(realRequests[0].ra_deg, 133.79512917);
+  assert.equal(realRequests[0].dec_deg, -7.24514722);
+  assert.equal(realRequests[0].fov_arcmin, undefined); // Preparation owns the 20′ master width.
+  assert.equal(globalThis.location.searchParams.get('fov'), '10');
+  assert.equal(globalThis.location.searchParams.get('source'), null);
   assert.match(app.innerHTML, /Could not load this patch/);
   assert.match(app.innerHTML, /View saved real observations at RA 180°, Dec −30° \(5′\)/);
-  assert.match(app.innerHTML, /Your search has not been replaced with simulated data/);
-  assert.doesNotMatch(app.innerHTML, /SYNTHETIC DEMO — NOT SPHEREx OBSERVATIONS/);
+  assert.doesNotMatch(app.innerHTML, removedDemoControls);
 
-  // Returning to the form hides the band picker; a new real search must use
-  // its visible default rather than the previously selected synthetic band.
-  click('home');
-  click('source-demo');
-  click('source-real');
+  listeners.click.forEach(listener => listener({ target: {
+    closest: () => ({ dataset: { action: 'home' }, tagName: 'BUTTON' }),
+    matches: () => false,
+  } }));
   const OriginalFormData = globalThis.FormData;
   globalThis.FormData = class {
     get(name) { return { ra: '180', dec: '-30', from: '', to: '' }[name]; }
@@ -77,18 +52,18 @@ test('example loads, date filtering stays inside the range, and errors remain ex
   } finally {
     globalThis.FormData = OriginalFormData;
   }
-  assert.deepEqual(realBands, ['D6', 'D4']);
+  assert.deepEqual(realRequests.map(request => request.band), ['D6', 'D4']);
   assert.equal(globalThis.location.searchParams.get('date'), null);
 });
 
-test('real viewer prepares all detectors, disables empty bands, and switches ready bands locally', async () => {
+test('real viewer prepares all detectors and keeps date filtering and band switching local', async () => {
   const listeners = {};
   const app = {
     innerHTML: '',
     addEventListener(event, callback) { (listeners[event] ||= []).push(callback); },
     querySelector() { return null; },
   };
-  const base = 'http://localhost:5173/?ra=133.79512917&dec=-7.24514722&from=2025-05-07&to=2025-05-07';
+  const base = 'http://localhost:5173/?ra=133.79512917&dec=-7.24514722&from=2025-05-07&to=2025-05-08&source=demo';
   globalThis.location = new URL(base);
   globalThis.history = { replaceState(_state, _title, url) { globalThis.location = new URL(url); } };
   globalThis.document = { querySelector() { return app; }, addEventListener() {}, hidden: false };
@@ -111,7 +86,7 @@ test('real viewer prepares all detectors, disables empty bands, and switches rea
       skipped_count: band === 'D4' ? 8 : 0,
       failures: [], limitations: ['Instrument quality flags have not yet been applied.'],
       frames: Array.from({ length: count }, (_, index) => ({
-        index, date_utc: `2025-05-07 ${index ? '20:15' : '03:12'}:00.000`, band,
+        index, date_utc: index ? '2025-05-08 20:15:00.000' : '2025-05-07 03:12:00.000', band,
         image_url: `/outputs/${id}/frame_${String(index).padStart(3, '0')}.png`,
         source_url: `https://irsa.ipac.caltech.edu/${band}-${index}.fits`,
         center_wavelength_um: band === 'D4' ? 3.2 + index * 0.4 : 1.9,
@@ -132,6 +107,7 @@ test('real viewer prepares all detectors, disables empty bands, and switches rea
   assert.deepEqual(requestedBands, ['D4']);
   assert.deepEqual(requestedUrls, ['/api/prepare']);
   assert.equal(globalThis.location.searchParams.get('fov'), '10');
+  assert.equal(globalThis.location.searchParams.get('source'), null);
   assert.match(app.innerHTML, /10′ wide/);
   assert.match(app.innerHTML, /Real SPHEREx observation|Loading real image/);
   assert.match(app.innerHTML, /\/outputs\/b{32}\/frame_000\.png/);
@@ -140,7 +116,7 @@ test('real viewer prepares all detectors, disables empty bands, and switches rea
   assert.match(app.innerHTML, /Brightness changes may reflect different wavelengths/);
   assert.match(app.innerHTML, /Verified bands were prepared with 20′ master images/);
   assert.match(app.innerHTML, /2\.423–3\.822 µm/);
-  assert.doesNotMatch(app.innerHTML, /SYNTHETIC DEMO — NOT SPHEREx OBSERVATIONS/);
+  assert.doesNotMatch(app.innerHTML, /Synthetic demo|try-wise|source-demo/i);
   assert.match(app.innerHTML, /min="2025-05-01"/);
   assert.match(app.innerHTML, /data-band="2"[^>]*disabled/);
 
@@ -152,6 +128,12 @@ test('real viewer prepares all detectors, disables empty bands, and switches rea
   clickAction('fov', { fov: '10' });
   await flush();
   assert.deepEqual(requestedBands, ['D4']); // Re-selecting unchanged settings is local.
+
+  listeners.change.forEach(listener => listener({ target: { dataset: { range: 'to' }, value: '2025-05-07' } }));
+  assert.match(app.innerHTML, /Showing 1 of 2 loaded frames/);
+  listeners.change.forEach(listener => listener({ target: { dataset: { range: 'to' }, value: '2025-05-08' } }));
+  assert.match(app.innerHTML, /Showing 2 of 2 loaded frames/);
+  assert.deepEqual(requestedBands, ['D4']);
 
   listeners.change.forEach(listener => listener({ target: { dataset: { range: 'from' }, value: '2025-05-01' } }));
   await flush();

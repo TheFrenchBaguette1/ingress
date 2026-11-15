@@ -52,10 +52,9 @@ test('an exact failed live request can display only its matching saved real obse
   await flush(); await flush();
   assert.deepEqual(calls.map(call => call.url), ['/api/prepare', './public/real-example/ra180-dec-30-d4/manifest.json']);
   assert.match(app.innerHTML, /Saved real SPHEREx observations/);
-  assert.match(app.innerHTML, /fixed snapshot, not a live search or simulated images/);
+  assert.match(app.innerHTML, /These SPHEREx frames were prepared earlier/);
   assert.match(app.innerHTML, /frame_000\.png/);
   assert.equal(globalThis.location.searchParams.get('fov'), '5');
-  assert.doesNotMatch(app.innerHTML, /Synthetic demo — not SPHEREx observations/);
 
   click('band', { band: '3' });
   await flush(); await flush();

@@ -1,16 +1,3 @@
-// The boundary between the sky viewer and its data sources. The demo is a
-// bundled illustration; only the team's /api/sequence endpoint supplies real images.
-
-export const WISE_0855 = Object.freeze({
-  name: 'WISE 0855',
-  ra: '08h55m10.831s',
-  dec: '-07d14m42.53s',
-  raDeg: 133.79512917,
-  decDeg: -7.24514722,
-});
-
-const DEMO_MANIFEST_URL = './public/demo/frames.json';
-const DEMO_FRAMES_URL = './public/demo/frames/';
 const REAL_EXAMPLE_URL = './public/real-example/ra180-dec-30-d4/manifest.json';
 const REAL_EXAMPLE_IMAGE = /^\/public\/real-example\/ra180-dec-30-d4\/frame_\d{3}\.png$/;
 const MISSION_START = '2025-05-01';
@@ -115,9 +102,6 @@ export function parseCoordinates(raText, decText) {
     raError: ra.error ?? '',
     decError: dec.error ?? '',
     isValid: !ra.error && !dec.error,
-    isWiseExample: !ra.error && !dec.error &&
-      Math.abs(raDeg - WISE_0855.raDeg) < 0.0001 &&
-      Math.abs(decDeg - WISE_0855.decDeg) < 0.0001,
   };
 }
 
@@ -554,69 +538,4 @@ export async function fetchRealPatch({ ra, dec, fov = 5, from = '', to = '', ban
     throw new PatchDataError('invalid_response', 'The SPHEREx data service did not return JSON.', error);
   }
   return normalizeSequencePatch(payload, coords, band, { from: first, to: last }, body.fov_arcmin);
-}
-
-export async function loadDemoPatch({ ra = WISE_0855.ra, dec = WISE_0855.dec, signal, fetchImpl = fetch } = {}) {
-  const coords = parseCoordinates(ra, dec);
-  if (!coords.isValid) throw new PatchDataError('invalid_request', coords.raError || coords.decError);
-  if (!coords.isWiseExample) {
-    throw new PatchDataError('demo_target_unavailable', 'The synthetic example exists only near WISE 0855.');
-  }
-  let response;
-  try {
-    response = await fetchImpl(DEMO_MANIFEST_URL, { signal });
-  } catch (error) {
-    if (error?.name === 'AbortError') throw error;
-    throw new PatchDataError('demo_unavailable', 'Could not open the bundled example.', error);
-  }
-  if (!response.ok) throw new PatchDataError('demo_unavailable', 'Could not open the bundled example.');
-  let manifest;
-  try {
-    manifest = await response.json();
-  } catch (error) {
-    throw new PatchDataError('demo_unavailable', 'The bundled example is incomplete.', error);
-  }
-  if (!manifest?.note?.includes('SYNTHETIC') || !Array.isArray(manifest.dates)) {
-    throw new PatchDataError('demo_unavailable', 'The bundled example is incomplete.');
-  }
-  const dates = manifest.dates.map(date => ({
-    id: date.id,
-    observedAt: `${date.id}T${date.time_utc}:00Z`,
-    timeUtc: date.time_utc,
-    visit: date.visit,
-  }));
-  const frames = [];
-  const bands = [];
-  for (const [number, data] of Object.entries(manifest.bands)) {
-    const info = BAND_INFO.find(band => band.number === Number(number));
-    if (!info) continue;
-    bands.push({ ...info, rangeUm: data.range_um, approximateRange: true });
-    for (const [dateId, frame] of Object.entries(data.frames)) {
-      frames.push({
-        dateId,
-        band: info.number,
-        wavelengthUm: frame.wavelength_um,
-        imageUrl: `${DEMO_FRAMES_URL}${frame.file}`,
-        flags: cleanFlags(frame.flags),
-        observationId: '',
-        pipelineVersion: '',
-        archiveUrl: '',
-        moverPct: frame.mover_pct,
-        variablePct: frame.variable_pct,
-      });
-    }
-  }
-  return {
-    source: 'synthetic',
-    status: 'ok',
-    target: { raDeg: WISE_0855.raDeg, decDeg: WISE_0855.decDeg, name: WISE_0855.name },
-    dates,
-    bands,
-    frames,
-    sizePx: manifest.size_px,
-    pixelScaleArcsec: manifest.pixel_arcsec,
-    fovMaxArcmin: manifest.fov_arcmin,
-    orientation: manifest.orientation,
-    releaseDate: '',
-  };
 }
