@@ -1,0 +1,9 @@
+astropy
+astroquery
+matplotlib
+numpy
+pillow
+reproject
+fastapi
+pydantic>=2,<3
+uvicorn
