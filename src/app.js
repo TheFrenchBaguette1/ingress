@@ -13,6 +13,14 @@ const fullViewerUrl = 'https://ideal-train-jjgp96g4g46rfqgwv-5173.app.github.dev
 const params = new URLSearchParams(location.search);
 const DEFAULT_FOV = 5;
 const ALL_WAVELENGTHS = Object.freeze({ number: 'all', rangeUm: [0.744, 5.002], color: '#e2c54a' });
+// Fixed sky-patch centers from Henry's Ingress test targets.
+const TEST_TARGETS = [
+  { id: 'barnard', name: 'Barnard’s Star', ra: '269.4464', dec: '4.7686' },
+  { id: 'epsilon-indi-b', name: 'Epsilon Indi B', ra: '331.096', dec: '-56.801' },
+  { id: 'wise-0855', name: 'WISE 0855−0714', ra: '133.795129', dec: '-7.245147' },
+  { id: 'rw-aurigae', name: 'RW Aurigae', ra: '76.9564', dec: '30.4014' },
+  { id: 'r-draconis', name: 'R Draconis', ra: '248.1675', dec: '66.7550' },
+];
 function bandFromQuery(query) {
   const number = Number(query.get('band'));
   if (Number.isInteger(number) && number >= 1 && number <= 6) return number;
@@ -395,6 +403,11 @@ function home() {
         <p class="hero-description">Enter sky coordinates, then step through available images to spot light that moves or changes.</p>
         </div>
         <form class="search-card" id="home-form" novalidate>
+          <div class="target-picker" role="group" aria-labelledby="target-picker-label">
+            <div class="card-heading" id="target-picker-label">Try a known target</div>
+            <div class="example-row">${TEST_TARGETS.map(target =>
+              `<button type="button" class="pill-button" data-action="target-preset" data-target="${esc(target.id)}">${esc(target.name)}</button>`).join('')}</div>
+          </div>
           <div class="card-heading">Enter coordinates</div>
           <div class="field-grid">
             <label class="field"><span class="field-label">RA <span>(right ascension)</span></span><input class="coord-input" name="ra" id="home-ra" placeholder="08h55m10.831s" autocomplete="off" value="${esc(state.ra)}" aria-invalid="${!!state.raError}" aria-describedby="ra-help"><span class="${state.raError ? 'input-error' : 'input-help'}" id="ra-help">${esc(state.raError || 'Hours or degrees, e.g. 08h55m10.831s or 133.795')}</span></label>
@@ -406,7 +419,7 @@ function home() {
             <p class="input-help">Blank dates search from May 2025 through today.</p>
           </div>
           ${state.dateError ? `<p class="form-error" role="alert">${esc(state.dateError)}</p>` : ''}
-          <div class="search-actions"><button type="submit" class="primary-button">✦ &nbsp;Show this patch</button><span class="example-prompt">No coordinates handy?</span><button type="button" class="pill-button" data-action="saved-real">View saved SPHEREx observations</button></div>
+          <div class="search-actions"><button type="submit" class="primary-button">✦ &nbsp;Show this patch</button><button type="button" class="pill-button" data-action="saved-real">View saved SPHEREx observations</button></div>
           <details class="explainer"><summary>What are RA and Dec?</summary><p>They are the sky’s longitude and latitude. RA runs from 0 to 24 hours (or 0 to 360°); Dec runs from −90° to +90°.</p></details>
         </form>
       </div>
@@ -727,10 +740,12 @@ function viewer() {
   const frames = visibleFrames();
   const band = selectedBand();
   const frame = currentFrame();
+  const namedTarget = TEST_TARGETS.find(target => Number(target.ra) === patch.target.raDeg &&
+    Number(target.dec) === patch.target.decDeg);
   const stillBuilding = state.prepared?.live && ACTIVE_BAND_STATUSES.has(flipbookEntry(state.prepared, state.band)?.status);
   return `<main class="viewer-layout"><div class="viewer-main"><div class="stage">
     <div class="provenance"><span class="status-badge ${patch.bundledRealExample ? 'saved-real' : 'real'}" data-real-badge>${patch.bundledRealExample ? 'Saved real SPHEREx observations' : frame ? 'Loading real image…' : 'Real SPHEREx observations'}</span>
-    <span class="target-name">${esc(patch.target.name || 'Your patch')} · <span class="mono muted">RA ${esc(state.ra)} · Dec ${esc(state.dec)}</span></span>
+    <span class="target-name">${esc(namedTarget?.name || patch.target.name || 'Your patch')} · <span class="mono muted">RA ${esc(state.ra)} · Dec ${esc(state.dec)}</span></span>
     ${patch.backendStatus === 'partial' && !stillBuilding ? `<span class="partial-note" role="status">${patch.zoomMissingOuterCount
       ? `Outer sky pixels unavailable in ${patch.zoomMissingOuterCount} selected frame${patch.zoomMissingOuterCount === 1 ? '' : 's'}; dates and products unchanged`
       : patch.failureCount ? `Partial sequence · ${patch.failureCount} exposure${patch.failureCount === 1 ? '' : 's'} could not be used` : 'Partial date coverage · the archive search was incomplete'}</span>` : ''}</div>
@@ -760,10 +775,10 @@ function render() {
     if (dialog) { dialog.showModal(); dialog.querySelector('[data-action="close-drawer"]')?.focus(); }
   }
 }
-function readForm(form) {
+function readForm(form, preset) {
   const data = new FormData(form);
-  const ra = String(data.get('ra') || '').trim();
-  const dec = String(data.get('dec') || '').trim();
+  const ra = preset?.ra ?? String(data.get('ra') || '').trim();
+  const dec = preset?.dec ?? String(data.get('dec') || '').trim();
   const previousQuery = [state.ra, state.dec, state.from, state.to].join('|');
   const headerForm = form.id === 'header-form';
   const previousCoords = parseCoordinates(state.ra, state.dec);
@@ -784,6 +799,7 @@ function readForm(form) {
   state.dateError = (state.from && !validDate(state.from) || state.to && !validDate(state.to)) ? 'Enter valid dates.' : '';
   if (!coords.isValid || state.dateError) { render(); (state.raError ? app.querySelector('[name="ra"]') : state.decError ? app.querySelector('[name="dec"]') : null)?.focus(); return; }
   state.ra = ra; state.dec = dec; state.headerRa = null; state.headerDec = null;
+  if (preset && liveFlipbook) state.band = 'all';
   const sameQuery = [state.ra, state.dec, state.from, state.to].join('|') === previousQuery;
   if (!sameQuery) state.activeDateId = '';
   if (sameQuery && state.view === 'viewer' && !state.recovery &&
@@ -1648,6 +1664,11 @@ app.addEventListener('click', event => {
   else if (action === 'view-prepared-band') viewPreparedBand(Number(target.dataset.band));
   else if (action === 'retry-same-parent') retrySameParentPixels();
   else if (action === 'search-date-range') loadPatch({ forceRefresh: true });
+  else if (action === 'target-preset') {
+    const preset = TEST_TARGETS.find(item => item.id === target.dataset.target);
+    const form = target.closest('#home-form');
+    if (preset && form) readForm(form, preset);
+  }
   else if (action === 'saved-real') showSavedRealExample();
   else if (action === 'retry-failed-query' && state.recovery) {
     Object.assign(state, state.recovery.attempted);

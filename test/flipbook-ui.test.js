@@ -58,12 +58,41 @@ async function mount(url, fetchImpl) {
   globalThis.window = { addEventListener() {} };
   globalThis.fetch = fetchImpl;
   await import(`../src/app.js?flipbook=${Math.random()}`);
-  const click = (action, extra = {}) => listeners.click.forEach(listener => listener({ target: {
-    closest: () => ({ dataset: { action, ...extra }, tagName: 'BUTTON' }),
+  const click = (action, extra = {}, form = null) => listeners.click.forEach(listener => listener({ target: {
+    closest: () => ({ dataset: { action, ...extra }, tagName: 'BUTTON', closest: () => form }),
     matches: () => false,
   } }));
   return { app, click };
 }
+
+test('a known target opens an archive search with the entered dates in one click', async () => {
+  const expected = { ra_deg: 331.096, dec_deg: -56.801, start_date: '2025-06-01', end_date: '2025-07-01', band: 'all' };
+  const calls = [];
+  const { app, click } = await mount('http://localhost:5173/', (path, options) => {
+    assert.equal(path, '/api/flipbook');
+    calls.push(JSON.parse(options.body));
+    const observation = manifest('D4', sequence4, ['2025-06-04 06:30:00.000']);
+    observation.request = { ...expected, band: 'D4', fov_arcmin: 20 };
+    return Promise.resolve(payload('complete', 1, { D4: { status: 'ready', manifest: observation } }));
+  });
+  assert.equal([...app.innerHTML.matchAll(/data-action="target-preset"/g)].length, 5);
+  assert.deepEqual(calls, []);
+  const originalFormData = globalThis.FormData;
+  const form = { id: 'home-form' };
+  globalThis.FormData = class {
+    constructor(value) { assert.equal(value, form); }
+    get(name) { return { ra: '12', dec: '75', from: expected.start_date, to: expected.end_date }[name]; }
+  };
+  try {
+    click('target-preset', { target: 'epsilon-indi-b' }, form);
+    await eventually(() => /Frame 1 of 1/.test(app.innerHTML));
+    assert.deepEqual(calls, [expected]);
+    assert.match(app.innerHTML, /Epsilon Indi B · <span[^>]*>RA 331\.096 · Dec -56\.801/);
+  } finally {
+    globalThis.FormData = originalFormData;
+    click('home');
+  }
+});
 
 test('All wavelengths opens progressively, adds earlier frames without changing the selection, and switches locally', async () => {
   const firstDate = '2025-06-04 06:30:00.000';

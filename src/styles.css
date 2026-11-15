@@ -53,8 +53,9 @@ h1, h2, h3, p { margin-top: 0; }
 .field-label span { font-size: .8rem; font-weight: 400; color: #b0b9c5; }
 .search-dates { margin-top: 20px; }
 .search-actions { display: flex; align-items: center; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
-.search-actions .example-prompt { color: #b4bbc6; font-size: .83rem; }
+.target-picker { margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid #303845; }
 .example-row { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.target-picker .pill-button { min-height: 38px; padding: 6px 12px; font-size: .85rem; }
 .explainer { margin-top: 13px; color: #aeb6c2; font-size: .83rem; }
 .explainer summary { color: #9cc9ff; cursor: pointer; }
 .explainer p { margin: 8px 0 0; }
