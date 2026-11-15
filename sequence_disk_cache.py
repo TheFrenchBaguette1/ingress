@@ -17,6 +17,7 @@ MAX_MANIFEST_BYTES = 1_000_000
 CACHED_DATA_NOTE = "Cached real observations; newer archive images may be available."
 PARTIAL_TTL_SECONDS = 15 * 60
 STABLE_FRAME_STORAGE = "stable-slots-v1"
+HENRY_FRAME_FILTER = "henry-playable-v1"
 CACHED_PARTIAL_NOTE = (
     "Saved partial real observations; some dates or exposures may be missing. "
     "Use Refresh observations to search the archive again."
@@ -60,17 +61,6 @@ def _intact_png(path):
             if image.format != "PNG" or image.mode != "RGBA":
                 return False
             image.verify()
-        # Legacy sequences could contain only a sliver at the image edge.
-        # Their center marker would then point at sky never observed. Newly
-        # built sequences enforce this before export; check saved ones too.
-        with Image.open(path) as image:
-            width, height = image.size
-            if width < 2 or height < 2:
-                return False
-            for y in ((height - 1) // 2, height // 2):
-                for x in ((width - 1) // 2, width // 2):
-                    if image.getpixel((x, y))[3] == 0:
-                        return False
         return True
     except (OSError, ValueError, SyntaxError):
         return False
@@ -85,6 +75,18 @@ def frame_filenames(manifest, frame, position):
     if frame.get("science_file") != science:
         raise ValueError("The saved frame has an invalid science filename.")
     return preview, science
+
+
+def preview_matches_science(preview_missing, science, frame, *, henry_policy=False):
+    """Validate display transparency, including recorded display-only fill."""
+    if preview_missing.shape != science.shape:
+        return False
+    science_missing = ~np.isfinite(science)
+    if not henry_policy:
+        return np.array_equal(preview_missing, science_missing)
+    filled = frame.get("preview_fill_pixels", 0)
+    return (type(filled) is int and not np.any(preview_missing & ~science_missing)
+            and filled == np.count_nonzero(~preview_missing & science_missing))
 
 
 def intact_saved_frames(manifest, output_root):
@@ -107,6 +109,8 @@ def intact_saved_frames(manifest, output_root):
     shape = (grid.get("height_pixels"), grid.get("width_pixels"))
     if not all(isinstance(value, int) and 2 <= value <= 600 for value in shape):
         return False
+    henry_policy = manifest.get("frame_filter") == HENRY_FRAME_FILTER
+    minimum_coverage = 0 if henry_policy else config.MIN_FRAME_COVERAGE_FRACTION
     seen_slots = set()
     for index, frame in enumerate(manifest["frames"]):
         if not isinstance(frame, dict):
@@ -120,7 +124,7 @@ def intact_saved_frames(manifest, output_root):
         seen_slots.add(preview)
         coverage = frame.get("coverage_fraction")
         if (not isinstance(coverage, (float, int)) or not math.isfinite(coverage)
-                or coverage < config.MIN_FRAME_COVERAGE_FRACTION or coverage > 1):
+                or coverage < minimum_coverage or coverage > 1):
             return False
         image_path = folder / preview
         if (image_path.resolve().parent != folder.resolve()
@@ -134,13 +138,17 @@ def intact_saved_frames(manifest, output_root):
             science = np.load(science_path, mmap_mode="r", allow_pickle=False)
             if science.shape != shape or science.dtype != np.dtype("float64"):
                 return False
-            height, width = shape
-            if not np.isfinite(science[(height - 1)//2:height//2+1,
-                                       (width - 1)//2:width//2+1]).all():
-                return False
+            if not henry_policy:
+                height, width = shape
+                center_y = slice((height - 1) // 2, height // 2 + 1)
+                center_x = slice((width - 1) // 2, width // 2 + 1)
+                if not np.isfinite(science[center_y, center_x]).all():
+                    return False
             with Image.open(image_path) as preview:
                 alpha_missing = np.asarray(preview)[::-1, :, 3] == 0
-            if not np.array_equal(alpha_missing, ~np.isfinite(science)):
+            if henry_policy and alpha_missing.ravel()[::7].all():
+                return False
+            if not preview_matches_science(alpha_missing, science, frame, henry_policy=henry_policy):
                 return False
         except (OSError, ValueError, TypeError):
             return False

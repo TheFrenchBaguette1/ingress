@@ -8,6 +8,8 @@ The live viewer starts with `POST /api/flipbook` and a JSON body containing `ra_
 
 A running detector can already contain a manifest with real PNGs. The browser decodes each new preview and grows the timeline while keeping the current acquisition selected. Each frame has a stable product, timestamp, and URL. Frames are ordered by observation time, including several independent exposures on the same UTC day. All exposures in a band share one WCS grid and fixed brightness scale. The server attempts up to 160 candidate exposures per detector in a bounded time window. Invalid or failed images and incomplete archive listings remain visible through counts and data notes.
 
+Manifests with `frame_filter: "henry-playable-v1"` keep an exposure when sampling every seventh pixel of its aligned preview finds a finite value. A masked center or sparse coverage is allowed. Saturated cores are filled in the preview, while the aligned science array retains calibrated values and its mask. `preview_fill_pixels` counts display pixels rendered at locations marked no-data in the science array.
+
 ## Legacy sequence request
 
 `POST /api/sequence` (proxied to backend `POST /sequence`), `Content-Type: application/json`:
@@ -57,7 +59,7 @@ The original build stores each aligned `float64` science image in `science_000.n
 
 Older PNG-only saved sequences have no recoverable floating-point array. The backend can upgrade one by rereading the **recorded FITS URLs only** and rebuilding the aligned arrays and previews; it fails explicitly if those sources are unavailable. It cannot prove that pixels reconstructed from a legacy sequence exactly match the old PNG preview because the original float values were never saved. New sequences retain arrays from their first build and support exact pixel comparisons across zoom widths.
 
-`grid.sky_footprint` and `frames[].sky_footprint` list four RA/Dec corners of the **requested rectangular WCS grid**, in order around its edges; they do not claim that every point was observed. Per-frame `coverage_fraction` and transparent PNG pixels describe the actual valid mask. The saved science pixels are the output of the initial **bilinear WCS reprojection** from the archive cutout; this format does not retain the original native FITS pixel values. Subsequent crops preserve the saved aligned floats exactly. The same fixed display scale makes intensities visually comparable across zoom widths of one sequence. An unrelated new `/sequence` request, even at the same coordinates but a different FOV, can select different products and calculate an independent scale.
+`grid.sky_footprint` and `frames[].sky_footprint` list four RA/Dec corners of the requested rectangular WCS grid in order around its edges. `coverage_fraction` measures the finite aligned science pixels. For previews with saturated-core fill, the PNG can show more pixels than the science array. Zoom crops the saved science and preview together to preserve both. The same fixed display scale applies at each zoom width. A new `/sequence` request at a different FOV can select different products and calculate an independent scale.
 
 ## Errors
 

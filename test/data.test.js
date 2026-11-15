@@ -198,6 +198,24 @@ test('edge-only cached images cannot masquerade as a useful target sequence', ()
     error => error instanceof PatchDataError && error.code === 'low_coverage');
 });
 
+test('verified playable-frame selection retains sparse and unmeasured-wavelength exposures', () => {
+  const coords = parseCoordinates(WISE_0855.ra, WISE_0855.dec);
+  const manifest = sequenceManifest('ready');
+  Object.assign(manifest.frames[0], { coverage_fraction: 0.10, center_wavelength_um: null });
+  Object.assign(manifest.frames[1], { coverage_fraction: 0.35, center_wavelength_um: null });
+  manifest.display = { missing_pixels: 'transparent' };
+  assert.throws(() => normalizeSequencePatch(manifest, coords, 4, {}, 5),
+    error => error instanceof PatchDataError && error.code === 'low_coverage');
+
+  manifest.frame_filter = 'henry-playable-v1';
+  const patch = normalizeSequencePatch(manifest, coords, 4, {}, 5);
+  assert.deepEqual(patch.frames.map(frame => frame.coverageFraction), [0.10, 0.35]);
+  assert.deepEqual(patch.frames.map(frame => frame.imageUrl), manifest.frames.map(frame => frame.image_url));
+  assert.ok(patch.frames.every(frame => frame.wavelengthUm === null &&
+    frame.flags.some(flag => flag.code === 'partial_coverage')));
+  assert.equal(patch.display.missing_pixels, 'transparent');
+});
+
 test('a busy build is retried with the same request, and cancellation stops retries', async () => {
   let calls = 0;
   let waits = 0;

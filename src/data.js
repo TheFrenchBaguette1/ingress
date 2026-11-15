@@ -195,14 +195,11 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
   const zoomMissingOuterCount = validCount(manifest.zoom_missing_outer_count) || 0;
   if (zoomMissingOuterCount) warnings.unshift(`Outer sky pixels could not be loaded from ${zoomMissingOuterCount} selected parent exposure${zoomMissingOuterCount === 1 ? '' : 's'}. The transparent mask is retained.`);
   if (failures) warnings.unshift(`${failures} observation${failures === 1 ? '' : 's'} could not be used (load or coverage issue).`);
-  // Older saved sequences can include a sliver of an exposure at the edge of
-  // the patch. A missing target wavelength plus low coverage also indicates
-  // an edge-only cutout whose center may be blank. New builds validate the
-  // center explicitly; keep old snapshots from presenting a black crosshair.
-  const usableFrames = manifest.frames.filter(frame => {
-    // A zoom retains its previously selected parent exposures, including
-    // uncovered edges in a wider field. Their transparent masks remain visible.
-    if (preserveSelectedFrames) return true;
+  // Respect the backend's explicit playable-frame selection and keep
+  // previously selected parents intact through zoom. Apply the older
+  // center-coverage heuristic only when no such selection is guaranteed.
+  const selectedByBackend = manifest.frame_filter === 'henry-playable-v1';
+  const usableFrames = preserveSelectedFrames || selectedByBackend ? manifest.frames : manifest.frames.filter(frame => {
     const coverage = frame?.coverage_fraction;
     return typeof coverage !== 'number' ||
       coverage >= 0.25 && !(coverage < 0.5 && frame.center_wavelength_um == null);
@@ -542,8 +539,8 @@ export function waitForFlipbookUpdate(signal) {
 
 export function flipbookBandPatch(entry, { target, band, queryRange }) {
   if (!entry?.manifest || !['running', 'ready', 'partial'].includes(entry.status)) return null;
-  // The flipbook worker verifies both input and aligned target coverage when
-  // publishing every frame, including ones with missing wavelength metadata.
+  // The progressive worker publishes its selected exposure list. Keep that
+  // list intact as the job adds frames, including earlier progressive builds.
   const patch = normalizeSequencePatch(entry.manifest, target, band, queryRange, 20,
     { preserveSelectedFrames: true });
   return patch.status === 'ok' ? patch : null;

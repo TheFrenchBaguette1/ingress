@@ -16,7 +16,7 @@ from flipbook_render import (
 )
 from henry_fits import BAD_FLAG_BITS, ParentReadUnavailable
 from sequence import SequenceRequest
-from sequence_disk_cache import find_saved_sequence
+from sequence_disk_cache import HENRY_FRAME_FILTER, find_saved_sequence
 from zoom import ZoomRequest, build_zoom
 
 
@@ -214,10 +214,11 @@ class ProgressiveFrameTests(unittest.TestCase):
             for i in range(len(BAD_FLAG_BITS)):
                 self.assertTrue(np.isnan(frame["image"][110, 15 + 3 * i]))
 
-    def test_wavelength_failure_keeps_verified_science_but_native_mask_rejection_does_not_fallback(self):
+    def test_sparse_native_frame_with_masked_center_can_play_without_wavelength(self):
         with TemporaryDirectory() as directory:
             writer, row, header = self.native_case(directory)
-            image = np.full((340, 340), 4e6)
+            image = np.full((340, 340), np.nan)
+            image[95:130, 75:105] = 4e6
             flags = np.zeros(image.shape, dtype=np.int64)
             with (
                 patch("flipbook_render.read_parent", return_value=(header, image, flags, 0, 0)),
@@ -227,12 +228,60 @@ class ProgressiveFrameTests(unittest.TestCase):
                 valid = writer.align(row, 18)
                 self.assertTrue(valid["quality_mask_applied"])
                 self.assertIsNone(valid["center_wavelength_um"])
-                self.assertAlmostEqual(valid["image"][100, 100], 4)
+                self.assertAlmostEqual(valid["image"][40, 40], 4)
+                self.assertTrue(np.isnan(valid["image"][100, 100]))
+                self.assertLess(valid["coverage_fraction"], 0.25)
 
-                flags[169:171, 149:151] = 1 << 9
-                with self.assertRaisesRegex(ValueError, "target center"):
+                flags[:] = 1 << 9
+                with self.assertRaisesRegex(ValueError, "no playable sampled pixels"):
                     writer.align(row, 18)
             fallback.assert_not_called()
+
+    def test_overflow_and_six_pixel_fringe_fill_only_the_display(self):
+        with TemporaryDirectory() as directory:
+            writer, row, header = self.native_case(directory)
+            image = np.full((340, 340), 2e6)
+            image[100, 100] = 15e6
+            flags = np.zeros(image.shape, dtype=np.int64)
+            flags[110, 80] = (1 << 1) | (1 << 9)  # Saturated core with bad sample.
+            flags[110, 86] = 1 << 9               # Six native pixels from the core.
+            flags[110, 87] = 1 << 9               # Seven pixels from the core.
+            with (
+                patch("flipbook_render.read_parent", return_value=(header, image, flags, 0, 0)),
+                patch("flipbook_render.read_wavelength", return_value=(3.1, 0.2)),
+            ):
+                frame = writer.align(row, 18)
+            self.assertAlmostEqual(frame["preview_pixels"][40, 30], 15)
+            self.assertAlmostEqual(frame["preview_pixels"][40, 36], 15)
+            self.assertTrue(np.isnan(frame["preview_pixels"][40, 37]))
+            self.assertAlmostEqual(frame["preview_pixels"][120, 120], 2)
+            self.assertEqual(frame["preview_fill_pixels"], 2)
+
+            manifest = writer.manifest([frame], candidate_count=1, attempted_count=1,
+                                       failure_count=0, status="ready")
+            saved = manifest["frames"][0]
+            self.assertEqual(manifest["frame_filter"], HENRY_FRAME_FILTER)
+            self.assertEqual(saved["preview_fill_pixels"], 2)
+            self.assertNotIn("preview_pixels", saved)
+            science = np.load(writer.folder / saved["science_file"], allow_pickle=False)
+            self.assertTrue(np.isnan(science[40, 30]))
+            self.assertTrue(np.isnan(science[40, 36]))
+            self.assertAlmostEqual(science[30, 50], 15)
+            with Image.open(writer.folder / Path(saved["image_url"]).name) as preview:
+                peak = preview.getpixel((30, writer.shape[0] - 1 - 40))
+                self.assertGreaterEqual(peak[0], 250)
+                self.assertEqual(peak[3], 255)
+                self.assertEqual(preview.getpixel((37, writer.shape[0] - 1 - 40))[3], 0)
+
+    def test_weighted_alignment_retains_support_above_henrys_threshold(self):
+        with TemporaryDirectory() as directory:
+            writer, _, _ = self.native_case(directory)
+            writer.shape = (1, 2)
+            image = np.array([[5.0, np.nan], [1.0, 1.0]])
+            coords = np.array([[0.0, 0.0], [0.39, 0.41]])
+            sample = writer._weighted_pixels(image, np.isfinite(image), coords)
+            self.assertAlmostEqual(sample[0, 0], 5)
+            self.assertTrue(np.isnan(sample[0, 1]))
 
     def test_native_window_clamps_at_detector_edge_without_filling_unobserved_sky(self):
         with TemporaryDirectory() as directory:

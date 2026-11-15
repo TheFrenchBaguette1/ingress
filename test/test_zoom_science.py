@@ -14,7 +14,9 @@ from astropy.time import Time
 from astropy.io import fits
 from astropy.wcs import WCS
 
+from flipbook_render import BandWriter
 from sequence import SequenceRequest, build_sequence
+from sequence_disk_cache import HENRY_FRAME_FILTER, intact_saved_frames
 from zoom import ZoomRequest, build_zoom
 
 
@@ -134,6 +136,40 @@ class TrueZoomTests(unittest.TestCase):
         self.assertEqual(twenty["frames"][0]["zoom_native_cutout_dimensions"],
                          {"width": 80, "height": 80})
         self.assertEqual(len(twenty["grid"]["sky_footprint"]), 4)
+
+    def test_playable_preview_fill_stays_separate_from_science_at_each_width(self):
+        writer = BandWriter(self.root, self.request, "D4")
+        pixels = np.full(writer.shape, np.nan)
+        pixels[:30] = 1.0
+        preview_pixels = pixels.copy()
+        preview_pixels[98:102, 98:102] = 6.0
+        time_mjd = float(self.observations[0]["t_min"])
+        frame = {
+            "image": pixels, "preview_pixels": preview_pixels,
+            "coverage_fraction": float(np.isfinite(pixels).mean()), "preview_fill_pixels": 16,
+            "source_url": self.sources[0], "date_utc": Time(time_mjd, format="mjd").iso,
+            "time_mjd": time_mjd, "band": "D4", "detector": "SPHEREx-D4",
+            "center_wavelength_um": None,
+        }
+        wide = writer.manifest([frame], candidate_count=1, attempted_count=1,
+                               failure_count=0, status="ready")
+        self.assertEqual(wide["frame_filter"], HENRY_FRAME_FILTER)
+        self.assertTrue(intact_saved_frames(wide, self.root))
+        with Image.open(writer.folder / "frame_000.png") as image:
+            original_preview = np.asarray(image).copy()
+        with patch("config.OUTPUT_ROOT", self.root), patch("zoom.load_cutout") as download:
+            medium, close = [build_zoom(ZoomRequest(sequence_id=writer.sequence_id, fov_arcmin=fov))
+                             for fov in (10, 5)]
+            self.assertEqual(build_zoom(ZoomRequest(sequence_id=writer.sequence_id, fov_arcmin=5)), close)
+        download.assert_not_called()
+        for manifest, offset in ((medium, 50), (close, 75)):
+            self.assertEqual(manifest["frames"][0]["preview_fill_pixels"], 16)
+            self.assertEqual(manifest["frames"][0]["product_id"], wide["frames"][0]["product_id"])
+            self.assertEqual(manifest["display"], wide["display"])
+            np.testing.assert_array_equal(self._science(manifest, 0), pixels[offset:-offset, offset:-offset])
+            relative_image = manifest["frames"][0]["image_url"].removeprefix("/outputs/")
+            with Image.open(self.root / relative_image) as image:
+                np.testing.assert_array_equal(np.asarray(image), original_preview[offset:-offset, offset:-offset])
 
     def test_unavailable_wider_cutout_keeps_selected_center_and_discloses_masked_outskirts(self):
         with (

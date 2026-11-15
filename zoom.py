@@ -27,7 +27,7 @@ import config
 from archive import load_cutout
 from sequence import make_output_grid, product_id_for_source, sky_footprint, write_display_png
 from saved_sources import _trusted_source
-from sequence_disk_cache import frame_filenames
+from sequence_disk_cache import HENRY_FRAME_FILTER, frame_filenames, preview_matches_science
 
 
 _backfill_lock = Lock()
@@ -210,27 +210,39 @@ def _pngs_intact(folder, manifest):
 
 
 def _png_masks_match(folder, manifest, science):
-    """Catch a damaged preview whose transparency differs from saved science."""
+    """Validate each preview against the saved science and display-only fill."""
+    henry_policy = manifest.get("frame_filter") == HENRY_FRAME_FILTER
     try:
         for index, (frame, pixels) in enumerate(zip(manifest["frames"], science)):
             filename, _ = frame_filenames(manifest, frame, index)
             with Image.open(folder / filename) as preview:
                 missing = np.asarray(preview)[::-1, :, 3] == 0
-            if not np.array_equal(missing, ~np.isfinite(pixels)):
+            if not preview_matches_science(missing, pixels, frame, henry_policy=henry_policy):
                 return False
         return True
     except (OSError, ValueError, IndexError):
         return False
 
 
-def _atomic_science_and_preview(folder, science_file, png_file, pixels, display):
+def _atomic_science_and_preview(folder, science_file, png_file, pixels, display, *,
+                               preview_pixels=None, previous_preview=None):
     """Keep a previously served zoom readable during same-parent retries."""
     token = uuid4().hex
     temp_science = folder / f".{token}.{science_file}"
     temp_png = folder / f".{token}.{png_file}"
     try:
         np.save(temp_science, pixels, allow_pickle=False)
-        write_display_png(pixels, temp_png, display)
+        height, width = pixels.shape
+        if previous_preview is not None and previous_preview.size == (width, height):
+            previous_preview.save(temp_png)
+        else:
+            write_display_png(pixels if preview_pixels is None else preview_pixels, temp_png, display)
+            if previous_preview is not None:
+                with Image.open(temp_png) as image:
+                    composite = image.copy()
+                composite.paste(previous_preview, ((width - previous_preview.width) // 2,
+                                                    (height - previous_preview.height) // 2))
+                composite.save(temp_png)
         os.replace(temp_science, folder / science_file)
         os.replace(temp_png, folder / png_file)
     finally:
@@ -249,6 +261,7 @@ def _atomic_manifest(path, manifest):
 
 def _same_sources(original, other):
     return (other.get("sequence_id") == original["sequence_id"]
+            and other.get("frame_filter") == original.get("frame_filter")
             and len(other.get("frames", [])) == len(original["frames"])
             and all(a["source_url"] == b["source_url"]
                     and a["date_utc"] == b["date_utc"]
@@ -401,14 +414,31 @@ def build_zoom(request, *, refresh=False):
     new_frames = []
     footprint = sky_footprint(target_wcs, target_shape)
     limitations = list(original.get("limitations", []))
+    henry_policy = original.get("frame_filter") == HENRY_FRAME_FILTER
     for index, (old_frame, (pixels, cutout_url, note, native_dimensions)) in enumerate(zip(original["frames"], transformed)):
         png_file, science_file = frame_filenames(original, old_frame, index)
+        previous_preview = None
+        preview_metadata = {}
+        if henry_policy:
+            master_frame = master["frames"][index]
+            master_png, _ = frame_filenames(master, master_frame, index)
+            with Image.open(master_dir / master_png) as saved_preview:
+                if expanding:
+                    previous_preview = saved_preview.copy()
+                    filled = master_frame.get("preview_fill_pixels", 0)
+                else:
+                    previous_preview = saved_preview.crop((start_x, start_y,
+                                                           start_x + target_shape[1], start_y + target_shape[0]))
+                    opaque = np.asarray(previous_preview)[::-1, :, 3] != 0
+                    filled = int(np.count_nonzero(opaque & ~np.isfinite(pixels)))
+            preview_metadata["preview_fill_pixels"] = filled
         _atomic_science_and_preview(target_dir, science_file, png_file,
-                                    pixels, original["display"])
+                                    pixels, original["display"], previous_preview=previous_preview)
         if note:
             limitations.append(f"{old_frame['source_url']}: {note}")
         new_frames.append({
             **old_frame,
+            **preview_metadata,
             "product_id": old_frame.get("product_id") or product_id_for_source(old_frame["source_url"]),
             "image_url": f"/outputs/{request.sequence_id}/zoom_{requested_fov:03d}/{png_file}",
             "science_file": science_file,

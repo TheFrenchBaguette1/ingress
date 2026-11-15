@@ -2,6 +2,7 @@ astropy
 astroquery
 matplotlib
 numpy
+scipy
 pillow
 reproject
 requests>=2.31

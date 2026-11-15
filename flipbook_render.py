@@ -10,14 +10,14 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.time import Time
 from astropy.wcs import WCS
-from reproject import reproject_interp
+from scipy.ndimage import binary_dilation, map_coordinates
 
 import config
 from archive import load_cutout
 from henry_fits import BAD_FLAG_BITS, BAD_FLAG_MASK, FLAG_NAMES, read_parent, read_wavelength
 from saved_sources import _trusted_source
 from sequence import finite_number, make_output_grid, product_id_for_source, sky_footprint
-from sequence_disk_cache import STABLE_FRAME_STORAGE
+from sequence_disk_cache import HENRY_FRAME_FILTER, STABLE_FRAME_STORAGE
 from zoom import _atomic_manifest, _atomic_science_and_preview
 
 
@@ -29,11 +29,15 @@ PADDED_CUTOUT_TIMEOUT_SECONDS = 7
 NATIVE_READ_TIMEOUT_SECONDS = 10
 WAVELENGTH_TIMEOUT_SECONDS = 3
 BRIGHTNESS_UNIT = u.MJy / u.sr
-PROGRESSIVE_PIPELINE = "progressive-v1"
+PROGRESSIVE_PIPELINE = "progressive-v2"
+SATURATED_MASK = 1 << 1
+SATURATION_FRINGE_PIXELS = 6
+MIN_BILINEAR_WEIGHT = 0.6
+PLAYBACK_SAMPLE_STRIDE = 7
 DETECTOR_IN_PRODUCT = re.compile(r"level2_.+_\d+(?P<band>D[1-6])_spx_.+\.fits")
 
 class _UnusableCoverage(ValueError):
-    """The available science data fails the viewer's coverage checks."""
+    """The frame contains no playable sampled pixels for this sky patch."""
 
 
 def archive_product_matches_band(source_url, band):
@@ -74,10 +78,8 @@ class BandWriter:
             "sky_footprint": self.footprint,
             "wcs_header": self.wcs.to_header().tostring(sep="\n", endcard=False, padding=False),
         }
-        self.center = (
-            slice((height - 1) // 2, height // 2 + 1),
-            slice((width - 1) // 2, width // 2 + 1),
-        )
+        yy, xx = np.indices(self.shape)
+        self.output_ra, self.output_dec = self.wcs.all_pix2world(xx.ravel(), yy.ravel(), 0)
         # Sampling the edges accounts for curved projected boundaries from
         # the native detector SIP model. Extra pixels cover bilinear taps.
         xs = np.linspace(-0.5, width - 0.5, 9)
@@ -107,8 +109,8 @@ class BandWriter:
         try:
             return self._align_native(source_url, time_mjd, native_deadline, deadline)
         except _UnusableCoverage:
-            # A successful native read may flag the target as unusable. An
-            # unchecked archive cutout must not make that target valid again.
+            # An unchecked archive cutout must not resurrect a native raster
+            # whose samples were confirmed to have no playable pixels.
             raise
         except Exception as native_error:
             now = monotonic()
@@ -142,20 +144,21 @@ class BandWriter:
         native_wcs = WCS(header)
         x, y = (float(value) for value in native_wcs.world_to_pixel(self.coord))
         local_x, local_y = x - x0, y - y0
-        self._check_center(local_x, local_y, image.shape)
         cropped_wcs = native_wcs.slice((slice(y0, y0 + native_height), slice(x0, x0 + native_width)))
-        image = np.array(image, dtype=np.float64, copy=True)
-        image[(flags & BAD_FLAG_MASK) != 0] = np.nan
-        aligned, coverage = self._align_image(image, cropped_wcs, header["BUNIT"])
-        center_x = min(max(round(local_x), 0), native_width - 1)
-        center_y = min(max(round(local_y), 0), native_height - 1)
-        center_flags = int(flags[center_y, center_x])
+        rasters = self._align_image(image, cropped_wcs, header["BUNIT"], flags)
+        center_in_image = (-0.5 <= local_x < native_width - 0.5
+                           and -0.5 <= local_y < native_height - 0.5)
+        center_flags = 0
+        if center_in_image:
+            center_x = min(max(round(local_x), 0), native_width - 1)
+            center_y = min(max(round(local_y), 0), native_height - 1)
+            center_flags = int(flags[center_y, center_x])
         flag_names = [FLAG_NAMES.get(bit, f"bit {bit}") for bit in range(32)
                       if center_flags & (1 << bit)]
 
         wavelength = bandwidth = None
         now = monotonic()
-        if now < deadline:
+        if center_in_image and now < deadline:
             try:
                 wavelength, bandwidth = read_wavelength(
                     source_url, x, y, header, deadline=min(deadline, now + WAVELENGTH_TIMEOUT_SECONDS),
@@ -166,7 +169,7 @@ class BandWriter:
                 pass
 
         return self._frame(
-            aligned, coverage, image.shape, time_mjd, source_url, wavelength, bandwidth,
+            rasters, image.shape, time_mjd, source_url, wavelength, bandwidth,
             cutout_url=None, processing_method="native_fits_range", quality_mask_applied=True,
             center_flag_names=flag_names, masked_flag_bits=list(BAD_FLAG_BITS),
             native_pixel_origin={"x": int(x0), "y": int(y0)},
@@ -194,45 +197,66 @@ class BandWriter:
         if cutout["source_url"] != source_url or cutout["detector"] != self.detector:
             raise ValueError("The retrieved exposure differs from the selected parent product.")
         image = cutout["image"]
-        self._check_center(cutout["target_x"], cutout["target_y"], image.shape)
-        aligned, coverage = self._align_image(image, cutout["wcs"], cutout["brightness_unit"])
+        rasters = self._align_image(image, cutout["wcs"], cutout["brightness_unit"])
         return self._frame(
-            aligned, coverage, image.shape, float(row["t_min"]), source_url,
+            rasters, image.shape, float(row["t_min"]), source_url,
             cutout.get("wavelength_um"), cutout.get("bandwidth_um"),
             cutout_url=cutout["cutout_url"], native_cutout_width_arcmin=width,
             processing_method="irsa_cutout", quality_mask_applied=False,
         )
 
-    @staticmethod
-    def _check_center(x, y, shape):
-        native_height, native_width = shape
-        if not (-0.5 <= x < native_width - 0.5 and -0.5 <= y < native_height - 0.5):
-            raise _UnusableCoverage("The target lies outside this observation.")
+    def _weighted_pixels(self, image, good, coords):
+        numerator = map_coordinates(np.where(good, image, 0.0), coords,
+                                    order=1, mode="constant", cval=0.0)
+        weight = map_coordinates(good.astype(np.float64), coords,
+                                 order=1, mode="constant", cval=0.0)
+        output = np.full(numerator.shape, np.nan, dtype=np.float64)
+        np.divide(numerator, weight, out=output, where=weight > MIN_BILINEAR_WEIGHT)
+        return output.reshape(self.shape)
 
-    def _align_image(self, image, wcs, brightness_unit):
-        # Each worker gets its own WCS object. wcslib can initialize internal
-        # WCS state when transforming coordinates.
+    def _align_image(self, image, wcs, brightness_unit, flags=None):
+        """Match Henry's playable raster while preserving calibrated science."""
         scale = u.Unit(brightness_unit).to(BRIGHTNESS_UNIT)
-        pixels, footprint = reproject_interp(
-            (image, wcs), self.wcs.deepcopy(),
-            shape_out=self.shape, order="bilinear",
+        calibrated = np.asarray(image, dtype=np.float64) * scale
+        px, py = wcs.all_world2pix(
+            self.output_ra, self.output_dec, 0, quiet=True, ra_dec_order=True,
         )
-        pixels = np.asarray(pixels, dtype=np.float64) * scale
-        valid = (footprint > 0) & np.isfinite(pixels)
-        coverage = float(np.count_nonzero(valid) / valid.size)
-        if coverage < config.MIN_FRAME_COVERAGE_FRACTION:
-            raise _UnusableCoverage(f"Only {coverage:.1%} of the requested sky patch has valid pixels.")
-        if not np.all(valid[self.center]):
-            raise _UnusableCoverage("The target center has no fully valid aligned pixels.")
-        pixels[~valid] = np.nan
-        return pixels, coverage
+        coords = np.vstack([py, px])
+        coords[~np.isfinite(coords)] = -1.0
+        good = np.isfinite(calibrated)
+        if flags is not None:
+            good &= (flags & BAD_FLAG_MASK) == 0
+        science = self._weighted_pixels(calibrated, good, coords)
+        preview = science
 
-    def _frame(self, pixels, coverage, shape, time_mjd, source_url, wavelength, bandwidth, **provenance):
+        if flags is not None:
+            saturated = (flags & SATURATED_MASK) != 0
+            if saturated.any():
+                saturated |= binary_dilation(saturated, iterations=SATURATION_FRINGE_PIXELS) & ~good
+                unsaturated = good & ~saturated
+                peak = float(calibrated[unsaturated].max()) if unsaturated.any() else 0.0
+                filled = np.where(saturated, peak, calibrated)
+                preview = self._weighted_pixels(filled, good | saturated, coords)
+
+        # Henry's exposure playback accepts a raster if one of the sampled
+        # pixels displays data. The sky center and edges may remain masked.
+        if not np.isfinite(preview.ravel()[::PLAYBACK_SAMPLE_STRIDE]).any():
+            raise _UnusableCoverage("The frame has no playable sampled pixels in the requested sky patch.")
+        science_valid = np.isfinite(science)
+        preview_valid = np.isfinite(preview)
+        return {
+            "image": science,
+            "preview_pixels": preview,
+            "coverage_fraction": float(science_valid.mean()),
+            "preview_fill_pixels": int(np.count_nonzero(preview_valid & ~science_valid)),
+        }
+
+    def _frame(self, rasters, shape, time_mjd, source_url, wavelength, bandwidth, **provenance):
         native_height, native_width = shape
         wavelength = finite_number(wavelength) if wavelength is not None else None
         bandwidth = finite_number(bandwidth) if bandwidth is not None else None
         return {
-            "image": pixels,
+            **rasters,
             "brightness_unit": str(BRIGHTNESS_UNIT),
             "date_utc": Time(time_mjd, format="mjd", scale="utc", precision=6).iso,
             "time_mjd": time_mjd,
@@ -240,14 +264,14 @@ class BandWriter:
             "detector": self.detector,
             "center_wavelength_um": wavelength if wavelength and wavelength > 0 else None,
             "center_bandwidth_um": bandwidth if bandwidth and bandwidth > 0 else None,
-            "coverage_fraction": coverage,
             "native_cutout_dimensions": {"width": native_width, "height": native_height},
             "source_url": source_url,
             **provenance,
         }
 
     def _set_display(self, frames):
-        values = np.concatenate([frame["image"][np.isfinite(frame["image"])] for frame in frames])
+        previews = [frame.get("preview_pixels", frame["image"]) for frame in frames]
+        values = np.concatenate([pixels[np.isfinite(pixels)] for pixels in previews])
         low, high = np.percentile(values, [config.DISPLAY_LOWER_PERCENTILE, config.DISPLAY_UPPER_PERCENTILE])
         if high <= low:
             low, high = values.min(), values.max()
@@ -285,9 +309,11 @@ class BandWriter:
             preview_name = f"frame_{slot:03d}.png"
             _atomic_science_and_preview(
                 self.folder, science_name, preview_name, frame["image"], self.display,
+                preview_pixels=frame.get("preview_pixels"),
             )
             self._records[source] = {
-                **{key: value for key, value in frame.items() if key not in {"image", "brightness_unit"}},
+                **{key: value for key, value in frame.items()
+                   if key not in {"image", "preview_pixels", "brightness_unit"}},
                 "index": slot,
                 "image_url": f"/outputs/{self.sequence_id}/{preview_name}",
                 "science_file": science_name,
@@ -312,11 +338,16 @@ class BandWriter:
                 f"{checked} exposure(s) use native FITS image sections and mask archive flag bits "
                 f"{', '.join(map(str, BAD_FLAG_BITS))} before WCS alignment."
             )
+            cutout_notes.append(
+                "Saturated cores and flagged fringes can be filled in the preview. "
+                "Saved science pixels retain their calibrated values and masks."
+            )
         if checked < len(frames):
             cutout_notes.append("Archive cutout fallback frames retain transparency but did not apply instrument quality flags.")
         manifest = {
             "sequence_id": self.sequence_id,
             "pipeline": PROGRESSIVE_PIPELINE,
+            "frame_filter": HENRY_FRAME_FILTER,
             "pipeline_complete": complete,
             "frame_storage": STABLE_FRAME_STORAGE,
             "status": status if frames else "empty",

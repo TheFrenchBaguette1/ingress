@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 import config
 from archive import ArchiveUnavailable, CENTRAL_FALLBACK_RADIUS_ARCSEC, _query_once, search_observations
 from archive_cache import MAX_CACHED_ROWS, cached_search_observations, warm_all_band_listing
-from flipbook_render import BandWriter, archive_product_matches_band
+from flipbook_render import PROGRESSIVE_PIPELINE, BandWriter, archive_product_matches_band
 from henry_catalog import search_catalog
 from saved_sources import find_saved_sources
 from sequence import SequenceRequest
@@ -378,7 +378,7 @@ def _saved_manifest(job, band, deadline, *, legacy_seed=False):
     )
     saved = find_saved_sequence(
         exact, config.OUTPUT_ROOT, deadline=deadline, allow_backfill=False,
-        pipeline="legacy" if legacy_seed else "progressive-v1",
+        pipeline="legacy" if legacy_seed else PROGRESSIVE_PIPELINE,
         allow_stale_partial=legacy_seed,
     )
     if saved and (legacy_seed or saved.get("cache_age_seconds", 0) < WARM_SECONDS):
