@@ -58,6 +58,7 @@
   background: #eceef1; animation: ig-cue 1.8s ease-in-out infinite;
 }
 .home-shell .home-story { min-width: 0; }
+.home-shell .home-story button { border-radius: 999px; }
 .home-shell .home-story #console { scroll-margin-top: 90px; }
 .home-shell #home-form { scroll-margin-top: 90px; }
 .home-shell .home-story svg { max-width: 100%; }

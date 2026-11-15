@@ -141,10 +141,12 @@ function home() {
   return `<main class="home">
     <section class="home-hero tl0" id="start" aria-labelledby="hero-title">
       ${heroOrnaments()}
-      <div class="h-title">
+      <div>
+        <div class="h-title">
         <div class="eyebrow">SPHEREx · Sky-patch time viewer</div>
         <h1 class="hero-title" id="hero-title">Pick a place in the sky.<br><em>Flip through dates</em><br>to see what changed.</h1>
         <p class="hero-description">Enter sky coordinates, then step through available images to spot light that moves or changes.</p>
+        </div>
         <form class="search-card" id="home-form" novalidate>
           <div class="card-heading">Enter coordinates</div>
           <div class="field-grid">
