@@ -55,14 +55,26 @@ export async function handleIngressRequest(request, response, {
           headers: {
             Accept: request.headers.accept || '*/*',
             ...(body ? { 'Content-Type': request.headers['content-type'] || 'application/json' } : {}),
+            ...(isOutput && request.headers['if-none-match'] ? { 'If-None-Match': request.headers['if-none-match'] } : {}),
+            ...(isOutput && request.headers['if-modified-since'] ? { 'If-Modified-Since': request.headers['if-modified-since'] } : {}),
           },
           body,
           signal: AbortSignal.timeout(timeoutMs),
         });
-        response.writeHead(upstream.status, {
+        const headers = {
           'Content-Type': upstream.headers.get('content-type') || 'application/octet-stream',
-          'Cache-Control': upstream.headers.get('cache-control') || 'no-store',
-        });
+          'Cache-Control': upstream.headers.get('cache-control') ||
+            (isOutput && (upstream.ok || upstream.status === 304) ? 'no-cache' : 'no-store'),
+        };
+        const retryAfter = upstream.headers.get('retry-after');
+        if (retryAfter) headers['Retry-After'] = retryAfter;
+        if (isOutput) {
+          for (const name of ['ETag', 'Last-Modified']) {
+            const value = upstream.headers.get(name);
+            if (value) headers[name] = value;
+          }
+        }
+        response.writeHead(upstream.status, headers);
         if (upstream.body && request.method !== 'HEAD') {
           Readable.fromWeb(upstream.body).on('error', error => response.destroy(error)).pipe(response);
         }

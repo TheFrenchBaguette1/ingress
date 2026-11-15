@@ -16,6 +16,7 @@ MAX_MANIFESTS_TO_SCAN = 512
 MAX_MANIFEST_BYTES = 1_000_000
 CACHED_DATA_NOTE = "Cached real observations; newer archive images may be available."
 PARTIAL_TTL_SECONDS = 15 * 60
+STABLE_FRAME_STORAGE = "stable-slots-v1"
 CACHED_PARTIAL_NOTE = (
     "Saved partial real observations; some dates or exposures may be missing. "
     "Use Refresh observations to search the archive again."
@@ -75,6 +76,17 @@ def _intact_png(path):
         return False
 
 
+def frame_filenames(manifest, frame, position):
+    """Validate an immutable frame slot, or the ordinal on older manifests."""
+    slot = frame.get("index") if manifest.get("frame_storage") == STABLE_FRAME_STORAGE else position
+    if type(slot) is not int or not 0 <= slot <= 999:
+        raise ValueError("The saved frame has an invalid storage slot.")
+    preview, science = f"frame_{slot:03d}.png", f"science_{slot:03d}.npy"
+    if frame.get("science_file") != science:
+        raise ValueError("The saved frame has an invalid science filename.")
+    return preview, science
+
+
 def intact_saved_frames(manifest, output_root):
     """Verify both PNG previews and aligned floats needed for trustworthy zoom."""
     if not cacheable_sequence(manifest):
@@ -95,22 +107,24 @@ def intact_saved_frames(manifest, output_root):
     shape = (grid.get("height_pixels"), grid.get("width_pixels"))
     if not all(isinstance(value, int) and 2 <= value <= 600 for value in shape):
         return False
+    seen_slots = set()
     for index, frame in enumerate(manifest["frames"]):
         if not isinstance(frame, dict):
             return False
-        image_url = str(frame.get("image_url", ""))
-        if not re.fullmatch(rf"/outputs/{sequence_id}/frame_\d{{3}}\.png", image_url):
+        try:
+            preview, science_file = frame_filenames(manifest, frame, index)
+        except ValueError:
             return False
+        if preview in seen_slots or frame.get("image_url") != f"/outputs/{sequence_id}/{preview}":
+            return False
+        seen_slots.add(preview)
         coverage = frame.get("coverage_fraction")
         if (not isinstance(coverage, (float, int)) or not math.isfinite(coverage)
                 or coverage < config.MIN_FRAME_COVERAGE_FRACTION or coverage > 1):
             return False
-        image_path = folder / image_url.split("/")[-1]
+        image_path = folder / preview
         if (image_path.resolve().parent != folder.resolve()
                 or not _intact_png(image_path)):
-            return False
-        science_file = f"science_{index:03d}.npy"
-        if frame.get("science_file") != science_file:
             return False
         science_path = folder / science_file
         try:
@@ -133,7 +147,7 @@ def intact_saved_frames(manifest, output_root):
     return True
 
 
-def find_saved_sequence(request, output_root, *, deadline=None):
+def find_saved_sequence(request, output_root, *, deadline=None, pipeline=None):
     """Find an intact completed sequence for this exact request, if available.
 
     Builds with actual frames write their manifest and PNGs under output/.
@@ -158,6 +172,8 @@ def find_saved_sequence(request, output_root, *, deadline=None):
             if (
                 manifest.get("request") != expected_request
                 or manifest.get("sequence_id") != sequence_id
+                or (pipeline is not None and manifest.get("pipeline") != pipeline)
+                or manifest.get("pipeline_complete") is False
                 or not cacheable_sequence(manifest)
                 or not 0 <= age_seconds
                 or (manifest["status"] == "partial" and age_seconds >= PARTIAL_TTL_SECONDS)

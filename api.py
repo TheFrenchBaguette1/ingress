@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 import config
 from archive import ArchiveUnavailable
+from flipbook import FlipbookBusy, FlipbookRequest, get_flipbook, request_flipbook_band, start_flipbook
 from sequence import SequenceRequest, build_sequence
 from sequence_disk_cache import (
     PARTIAL_TTL_SECONDS, cacheable_sequence, find_saved_sequence, intact_saved_frames,
@@ -149,4 +150,34 @@ def prepare_status(job_id: str):
     result = get_prepare(job_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Preparation job has expired. Start it again.")
+    return result
+
+
+@app.post("/flipbook")
+def create_flipbook(request: FlipbookRequest, refresh: bool = False):
+    """Queue an observation timeline and return before archive or image work."""
+    try:
+        return start_flipbook(request, refresh=refresh)
+    except FlipbookBusy as error:
+        raise HTTPException(status_code=503, detail=str(error), headers={"Retry-After": "3"}) from error
+
+
+@app.get("/flipbook/{job_id}")
+def flipbook_status(job_id: str):
+    result = get_flipbook(job_id) if re.fullmatch(r"[a-f0-9]{32}", job_id) else None
+    if result is None:
+        raise HTTPException(status_code=404, detail="Flipbook search has expired. Start it again.")
+    return result
+
+
+@app.post("/flipbook/{job_id}/band/{band}")
+def select_flipbook_band(job_id: str, band: str, refresh: bool = False):
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id) or not re.fullmatch(r"all|D[1-6]", band):
+        raise HTTPException(status_code=404, detail="Unknown flipbook or detector.")
+    try:
+        result = request_flipbook_band(job_id, band, refresh=refresh)
+    except FlipbookBusy as error:
+        raise HTTPException(status_code=503, detail=str(error), headers={"Retry-After": "3"}) from error
+    if result is None:
+        raise HTTPException(status_code=404, detail="Flipbook search has expired. Start it again.")
     return result

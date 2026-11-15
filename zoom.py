@@ -15,6 +15,7 @@ from time import monotonic
 from uuid import uuid4
 
 import numpy as np
+from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS
@@ -26,6 +27,7 @@ import config
 from archive import load_cutout
 from sequence import make_output_grid, product_id_for_source, sky_footprint, write_display_png
 from saved_sources import _trusted_source
+from sequence_disk_cache import frame_filenames
 
 
 _backfill_lock = Lock()
@@ -41,13 +43,16 @@ class ZoomUnavailable(ValueError):
     """Original science arrays or a compatible WCS grid are unavailable."""
 
 
-def _science_arrays(folder, frames, shape):
+def _science_arrays(folder, manifest, shape):
     arrays = []
-    for index, frame in enumerate(frames):
-        if frame.get("science_file") != f"science_{index:03d}.npy":
-            raise ZoomUnavailable("The selected sequence has no saved science pixels. Refresh its observations.")
-        path = folder / frame["science_file"]
+    seen = set()
+    for index, frame in enumerate(manifest["frames"]):
         try:
+            _, filename = frame_filenames(manifest, frame, index)
+            path = folder / filename
+            if filename in seen or path.resolve().parent != folder.resolve():
+                raise ValueError("The saved science path is duplicated or outside the sequence.")
+            seen.add(filename)
             image = np.load(path, mmap_mode="r", allow_pickle=False)
             if image.shape != shape or image.dtype != np.dtype("float64"):
                 raise ZoomUnavailable("Saved science pixels do not match the selected image grid.")
@@ -188,10 +193,14 @@ def _pngs_intact(folder, manifest):
     try:
         shape = _grid_shape(manifest["grid"])
         for index, frame in enumerate(manifest["frames"]):
-            filename = f"frame_{index:03d}.png"
-            if not frame["image_url"].endswith("/" + filename):
+            filename, _ = frame_filenames(manifest, frame, index)
+            path = folder / filename
+            url_folder = (f"{folder.parent.name}/{folder.name}" if folder.name.startswith("zoom_")
+                          else folder.name)
+            if (frame["image_url"] != f"/outputs/{url_folder}/{filename}"
+                    or path.resolve().parent != folder.resolve()):
                 return False
-            with Image.open(folder / filename) as image:
+            with Image.open(path) as image:
                 if image.format != "PNG" or image.mode != "RGBA" or image.size != shape[::-1]:
                     return False
                 image.verify()
@@ -200,11 +209,12 @@ def _pngs_intact(folder, manifest):
         return False
 
 
-def _png_masks_match(folder, science):
+def _png_masks_match(folder, manifest, science):
     """Catch a damaged preview whose transparency differs from saved science."""
     try:
-        for index, pixels in enumerate(science):
-            with Image.open(folder / f"frame_{index:03d}.png") as preview:
+        for index, (frame, pixels) in enumerate(zip(manifest["frames"], science)):
+            filename, _ = frame_filenames(manifest, frame, index)
+            with Image.open(folder / filename) as preview:
                 missing = np.asarray(preview)[::-1, :, 3] == 0
             if not np.array_equal(missing, ~np.isfinite(pixels)):
                 return False
@@ -270,8 +280,8 @@ def _available_master(folder, original, coord, *, skip_incomplete=False):
             if not _grid_matches(coord, manifest) or not _pngs_intact(candidate_dir, manifest):
                 continue
             shape = _grid_shape(manifest["grid"])
-            arrays = _science_arrays(candidate_dir, manifest["frames"], shape)
-            if not _png_masks_match(candidate_dir, arrays):
+            arrays = _science_arrays(candidate_dir, manifest, shape)
+            if not _png_masks_match(candidate_dir, manifest, arrays):
                 continue
             return candidate_dir, manifest, arrays
         except (ZoomUnavailable, KeyError, TypeError, ValueError):
@@ -296,17 +306,20 @@ def _expand_frame(frame, coord, target_wcs, target_shape, old_pixels, old_shape,
             observation, coord, target_shape[1] * config.OUTPUT_PIXEL_SCALE_ARCSEC / 60,
             cache=config.CACHE_DOWNLOADS, timeout_seconds=config.TIMEOUT_SECONDS,
         )
-        if (cutout.get("source_url", frame["source_url"]) != frame["source_url"]
-                or str(cutout["brightness_unit"]).strip() != display["brightness_unit"]):
-            raise ValueError("The parent exposure or brightness unit changed unexpectedly.")
+        if cutout.get("source_url", frame["source_url"]) != frame["source_url"]:
+            raise ValueError("The parent exposure changed unexpectedly.")
+        cutout_unit = str(cutout["brightness_unit"]).strip()
+        display_unit = display["brightness_unit"]
+        unit_scale = 1 if cutout_unit == display_unit else u.Unit(cutout_unit).to(u.Unit(display_unit))
         native_dimensions = {"width": int(cutout["image"].shape[1]),
                              "height": int(cutout["image"].shape[0])}
         reprojected, footprint = reproject_interp(
             (cutout["image"], cutout["wcs"]), target_wcs,
             shape_out=target_shape, order="bilinear",
         )
+        reprojected = np.asarray(reprojected, dtype=np.float64) * unit_scale
         valid = (footprint > 0) & np.isfinite(reprojected)
-        new_pixels[valid] = np.asarray(reprojected, dtype=np.float64)[valid]
+        new_pixels[valid] = reprojected[valid]
         cutout_url = cutout["cutout_url"]
     except Exception as error:
         # A failed parent fetch must never make us substitute another product.
@@ -335,8 +348,8 @@ def build_zoom(request, *, refresh=False):
 
     # A request for the original field itself needs no new FITS or PNG data.
     if _grid_shape(original["grid"]) == target_shape:
-        arrays = _science_arrays(folder, original["frames"], target_shape)
-        if not _pngs_intact(folder, original) or not _png_masks_match(folder, arrays):
+        arrays = _science_arrays(folder, original, target_shape)
+        if not _pngs_intact(folder, original) or not _png_masks_match(folder, original, arrays):
             raise ZoomUnavailable("The saved observation preview or mask is damaged. Search again.")
         return {**original, "zoom_source_sequence_id": original["sequence_id"],
                 "zoom_policy": "original aligned science pixels; no new exposure search"}
@@ -351,8 +364,8 @@ def build_zoom(request, *, refresh=False):
                     and _grid_shape(cached["grid"]) == target_shape
                     and _grid_matches(coord, cached)
                     and _pngs_intact(target_dir, cached)):
-                arrays = _science_arrays(target_dir, cached["frames"], target_shape)
-                if _png_masks_match(target_dir, arrays):
+                arrays = _science_arrays(target_dir, cached, target_shape)
+                if _png_masks_match(target_dir, cached, arrays):
                     return cached
         except (OSError, ValueError, KeyError, TypeError, ZoomUnavailable):
             pass
@@ -389,8 +402,7 @@ def build_zoom(request, *, refresh=False):
     footprint = sky_footprint(target_wcs, target_shape)
     limitations = list(original.get("limitations", []))
     for index, (old_frame, (pixels, cutout_url, note, native_dimensions)) in enumerate(zip(original["frames"], transformed)):
-        science_file = f"science_{index:03d}.npy"
-        png_file = f"frame_{index:03d}.png"
+        png_file, science_file = frame_filenames(original, old_frame, index)
         _atomic_science_and_preview(target_dir, science_file, png_file,
                                     pixels, original["display"])
         if note:

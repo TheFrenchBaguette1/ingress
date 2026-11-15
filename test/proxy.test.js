@@ -73,3 +73,29 @@ test('proxy shows backend disconnect and never serves dotfiles', async () => {
   await finished(secret);
   assert.equal(secret.statusCode, 403);
 });
+
+test('the flipbook proxy keeps job snapshots fresh and revalidates saved previews', async () => {
+  const fetchImpl = async (target, options) => {
+    if (target.pathname === '/flipbook/abc') {
+      assert.equal(options.headers['If-None-Match'], undefined);
+      return Response.json({ status: 'running' });
+    }
+    assert.equal(target.pathname, '/outputs/abc/frame_000.png');
+    assert.equal(options.headers['If-None-Match'], '"saved-preview"');
+    return new Response(null, { status: 304, headers: { ETag: '"saved-preview"' } });
+  };
+  const options = { apiOrigin: 'http://backend.test:8000', fetchImpl };
+  const snapshot = outgoing();
+  await handleIngressRequest(incoming('GET', '/api/flipbook/abc'), snapshot, options);
+  await finished(snapshot);
+  assert.equal(snapshot.headers['Cache-Control'], 'no-store');
+
+  const request = incoming('GET', '/outputs/abc/frame_000.png');
+  request.headers['if-none-match'] = '"saved-preview"';
+  const preview = outgoing();
+  await handleIngressRequest(request, preview, options);
+  await finished(preview);
+  assert.equal(preview.statusCode, 304);
+  assert.equal(preview.headers.ETag, '"saved-preview"');
+  assert.equal(preview.body().length, 0);
+});
