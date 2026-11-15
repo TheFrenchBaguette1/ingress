@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PIL import Image
+import numpy as np
 
 from api import create_sequence, sequence_cache
 from sequence import SequenceRequest
@@ -30,13 +31,18 @@ class SequenceDiskCacheTests(unittest.TestCase):
         Image.new("RGBA", (2, 2), (255, 255, 255, 255)).save(
             self.folder / "frame_000.png"
         )
+        np.save(self.folder / "science_000.npy", np.ones((2, 2), dtype=np.float64),
+                allow_pickle=False)
         self.manifest = {
             "sequence_id": self.sequence_id,
             "status": "ready",
+            "science_format": "aligned-npy-v1",
             "request": self.request.model_dump(mode="json"),
+            "grid": {"width_pixels": 2, "height_pixels": 2},
             "frame_count": 1,
             "frames": [{
                 "image_url": f"/outputs/{self.sequence_id}/frame_000.png",
+                "science_file": "science_000.npy",
                 "source_url": "https://example.org/actual.fits",
                 "coverage_fraction": 0.92,
             }],
@@ -80,6 +86,15 @@ class SequenceDiskCacheTests(unittest.TestCase):
             patch("api.build_sequence", return_value={"status": "empty"}) as build,
         ):
             create_sequence(self.request)
+        build.assert_called_once_with(self.request)
+
+    def test_missing_science_never_returns_a_png_only_cached_sequence(self):
+        (self.folder / "science_000.npy").unlink()
+        with (
+            patch("api.config.OUTPUT_ROOT", self.root),
+            patch("api.build_sequence", return_value={"status": "empty"}) as build,
+        ):
+            self.assertEqual(create_sequence(self.request)["status"], "empty")
         build.assert_called_once_with(self.request)
 
     def test_removed_frame_invalidates_the_in_memory_sequence(self):

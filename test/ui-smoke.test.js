@@ -14,12 +14,12 @@ test('example loads, date filtering stays inside the range, and errors remain ex
   globalThis.document = { querySelector() { return app; }, addEventListener() {}, hidden: false };
   globalThis.window = { addEventListener() {} };
   const manifest = await readFile(new URL('../public/demo/frames.json', import.meta.url), 'utf8');
-  const realFovs = [];
+  const realRequests = [];
   const realBands = [];
   globalThis.fetch = async (url, options) => {
     if (options?.body) {
       const request = JSON.parse(options.body);
-      realFovs.push(request.fov_arcmin);
+      realRequests.push({ url: String(url), request });
       realBands.push(request.band);
     }
     return String(url).includes('frames.json')
@@ -54,7 +54,8 @@ test('example loads, date filtering stays inside the range, and errors remain ex
 
   click('source-real');
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(realFovs, [5]);
+  assert.deepEqual(realRequests.map(call => call.url), ['/api/prepare']);
+  assert.equal(realRequests[0].request.fov_arcmin, undefined); // Preparation owns the 20′ master width.
   assert.equal(globalThis.location.searchParams.get('fov'), '5');
   assert.match(app.innerHTML, /Could not load this patch/);
   assert.match(app.innerHTML, /View saved real observations at RA 180°, Dec −30° \(5′\)/);
@@ -80,7 +81,7 @@ test('example loads, date filtering stays inside the range, and errors remain ex
   assert.equal(globalThis.location.searchParams.get('date'), null);
 });
 
-test('real viewer searches selected detector, offers another band after empty result, and reuses loaded frames', async () => {
+test('real viewer prepares all detectors, disables empty bands, and switches ready bands locally', async () => {
   const listeners = {};
   const app = {
     innerHTML: '',
@@ -94,38 +95,42 @@ test('real viewer searches selected detector, offers another band after empty re
   const windowListeners = {};
   globalThis.window = { addEventListener(type, callback) { (windowListeners[type] ||= []).push(callback); } };
   const requestedBands = [];
-  const requestedFovs = [];
   const requestedUrls = [];
   globalThis.fetch = async (url, options) => {
     requestedUrls.push(String(url));
+    assert.match(String(url), /^\/api\/prepare(?:\?refresh=1)?$/);
     const request = JSON.parse(options.body);
     requestedBands.push(request.band);
-    requestedFovs.push(request.fov_arcmin);
-    const empty = request.band === 'D2';
-    const id = 'b'.repeat(32);
-    const manifest = {
-      status: empty ? 'empty' : 'ready',
-      request,
-      grid: { width_pixels: 100, pixel_scale_arcsec: 6, orientation: 'north up, east left' },
-      candidate_count: empty ? 0 : 10, attempted_count: empty ? 0 : 2, skipped_count: empty ? 0 : 8,
+    assert.equal(request.fov_arcmin, undefined);
+    const manifest = (band, id, count) => ({
+      status: 'ready', sequence_id: id,
+      request: { ...request, band, fov_arcmin: 20 },
+      grid: { width_pixels: 200, height_pixels: 200, pixel_scale_arcsec: 6,
+        orientation: 'north up, east left' },
+      candidate_count: band === 'D4' ? 10 : 1, attempted_count: count,
+      skipped_count: band === 'D4' ? 8 : 0,
       failures: [], limitations: ['Instrument quality flags have not yet been applied.'],
-      frames: empty ? [] : [{
-        index: 0, date_utc: '2025-05-07 03:12:00.000', band: request.band,
-        image_url: `/outputs/${id}/frame_000.png`, source_url: 'https://irsa.ipac.caltech.edu/example',
-        center_wavelength_um: 3.2, coverage_fraction: 1,
-      }, {
-        index: 1, date_utc: '2025-05-07 20:15:00.000', band: request.band,
-        image_url: `/outputs/${id}/frame_001.png`, source_url: 'https://irsa.ipac.caltech.edu/example-two',
-        center_wavelength_um: 3.6, coverage_fraction: 1,
-      }],
-    };
-    return new Response(JSON.stringify(manifest), { status: 200 });
+      frames: Array.from({ length: count }, (_, index) => ({
+        index, date_utc: `2025-05-07 ${index ? '20:15' : '03:12'}:00.000`, band,
+        image_url: `/outputs/${id}/frame_${String(index).padStart(3, '0')}.png`,
+        source_url: `https://irsa.ipac.caltech.edu/${band}-${index}.fits`,
+        center_wavelength_um: band === 'D4' ? 3.2 + index * 0.4 : 1.9,
+        coverage_fraction: 1,
+      })),
+    });
+    const bands = Object.fromEntries(Array.from({ length: 6 }, (_, index) =>
+      [`D${index + 1}`, { status: 'empty' }]));
+    bands.D4 = { status: 'ready', manifest: manifest('D4', 'b'.repeat(32), 2) };
+    bands.D3 = { status: 'ready', manifest: manifest('D3', 'c'.repeat(32), 1) };
+    return new Response(JSON.stringify({ job_id: 'a'.repeat(32), status: 'complete',
+      requested_band: request.band, canonical_fov_arcmin: 20, bands,
+      completed_count: 6, total_count: 6 }), { status: 200 });
   };
   await import(`../src/app.js?real=${Date.now()}`);
   const flush = () => new Promise(resolve => setImmediate(resolve));
   await flush();
   assert.deepEqual(requestedBands, ['D4']);
-  assert.deepEqual(requestedFovs, [10]); // Shared coordinate URLs without fov retain their old width.
+  assert.deepEqual(requestedUrls, ['/api/prepare']);
   assert.equal(globalThis.location.searchParams.get('fov'), '10');
   assert.match(app.innerHTML, /10′ wide/);
   assert.match(app.innerHTML, /Real SPHEREx observation|Loading real image/);
@@ -133,10 +138,11 @@ test('real viewer searches selected detector, offers another band after empty re
   assert.match(app.innerHTML, /Instrument quality flags have not yet been applied/);
   assert.match(app.innerHTML, /sampled 2 of 10 candidate exposures/);
   assert.match(app.innerHTML, /Brightness changes may reflect different wavelengths/);
-  assert.match(app.innerHTML, /deep-field-only exposures are not searched/);
+  assert.match(app.innerHTML, /Verified bands were prepared with 20′ master images/);
   assert.match(app.innerHTML, /2\.423–3\.822 µm/);
   assert.doesNotMatch(app.innerHTML, /SYNTHETIC DEMO — NOT SPHEREx OBSERVATIONS/);
   assert.match(app.innerHTML, /min="2025-05-01"/);
+  assert.match(app.innerHTML, /data-band="2"[^>]*disabled/);
 
   const clickAction = (action, extras = {}) => listeners.click.forEach(listener => listener({ target: {
     closest: () => ({ dataset: { action, ...extras }, tagName: 'BUTTON' }),
@@ -157,26 +163,33 @@ test('real viewer searches selected detector, offers another band after empty re
   } }));
   click(2);
   await flush();
-  assert.deepEqual(requestedBands, ['D4', 'D4', 'D2']);
-  assert.match(app.innerHTML, /No usable images for this search/);
-  assert.match(app.innerHTML, /Search Band 4/);
+  assert.deepEqual(requestedBands, ['D4', 'D4']);
+  assert.equal(globalThis.location.searchParams.get('band'), '4');
+  assert.match(app.innerHTML, /data-band="2"[^>]*disabled/);
+  click(3);
+  assert.deepEqual(requestedBands, ['D4', 'D4']);
+  assert.match(app.innerHTML, /\/outputs\/c{32}\/frame_000\.png/);
+  assert.equal(globalThis.location.searchParams.get('band'), '3');
   click(4);
   await flush();
-  assert.deepEqual(requestedBands, ['D4', 'D4', 'D2']);
+  assert.deepEqual(requestedBands, ['D4', 'D4']);
   assert.match(app.innerHTML, /\/outputs\/b{32}\/frame_000\.png/);
 
   listeners.click.forEach(listener => listener({ target: {
-    closest: () => ({ dataset: { action: 'retry' }, tagName: 'BUTTON' }),
+    closest: () => ({ dataset: { action: 'retry-preparation' }, tagName: 'BUTTON' }),
     matches: () => false,
   } }));
   await flush();
-  assert.deepEqual(requestedBands, ['D4', 'D4', 'D2', 'D4']);
-  assert.equal(requestedUrls.at(-1), '/api/sequence?refresh=1');
+  assert.deepEqual(requestedBands, ['D4', 'D4', 'D4']);
+  assert.equal(requestedUrls.at(-1), '/api/prepare?refresh=1');
 
-  globalThis.location = new URL(`${base}&fov=5`);
+  const reentry = new URL(globalThis.location.href);
+  reentry.searchParams.delete('sequence');
+  reentry.searchParams.set('fov', '5');
+  globalThis.location = reentry;
   windowListeners.popstate.forEach(listener => listener());
   await flush();
-  assert.equal(requestedFovs.at(-1), 5);
+  assert.deepEqual(requestedBands, ['D4', 'D4', 'D4']);
   assert.equal(globalThis.location.searchParams.get('fov'), '5');
   assert.match(app.innerHTML, /5′ wide/);
 });
@@ -191,14 +204,15 @@ test('partial real frames can be refreshed and an empty local date filter can se
   globalThis.window = { addEventListener() {} };
   const requests = [];
   globalThis.fetch = async (url, options) => {
+    assert.match(String(url), /^\/api\/prepare(?:\?refresh=1)?$/);
     const body = JSON.parse(options.body);
     requests.push({ url: String(url), body });
     const searchedDay = body.start_date === '2025-05-08' ? '2025-05-08' : '2025-05-07';
     const partial = body.start_date !== '2025-05-08';
-    return new Response(JSON.stringify({
+    const manifest = {
       status: partial ? 'partial' : 'ready', cached_partial: partial && requests.length === 1,
-      request: body, sequence_id: 'c'.repeat(32),
-      grid: { width_pixels: 50, pixel_scale_arcsec: 6, orientation: 'north up, east left' },
+      request: { ...body, fov_arcmin: 20 }, sequence_id: 'c'.repeat(32),
+      grid: { width_pixels: 200, height_pixels: 200, pixel_scale_arcsec: 6, orientation: 'north up, east left' },
       candidate_count: 4, attempted_count: 2, skipped_count: 2,
       limitations: ['Time-spread sample: some dates were skipped.'],
       failures: partial ? [{ error: 'No valid center' }] : [],
@@ -206,7 +220,13 @@ test('partial real frames can be refreshed and an empty local date filter can se
         image_url: `/outputs/${'c'.repeat(32)}/frame_000.png`,
         source_url: 'https://irsa.ipac.caltech.edu/real.fits', center_wavelength_um: 3.1,
         coverage_fraction: 0.9 }],
-    }), { status: 200 });
+    };
+    const bands = Object.fromEntries(Array.from({ length: 6 }, (_, index) =>
+      [`D${index + 1}`, { status: 'empty' }]));
+    bands.D4 = { status: manifest.status, manifest };
+    return new Response(JSON.stringify({ job_id: 'a'.repeat(32), status: 'complete',
+      requested_band: body.band, canonical_fov_arcmin: 20, bands,
+      completed_count: 6, total_count: 6 }), { status: 200 });
   };
   await import(`../src/app.js?date-search=${Date.now()}`);
   const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -219,7 +239,7 @@ test('partial real frames can be refreshed and an empty local date filter can se
   } }));
   click('refresh-observations');
   await flush();
-  assert.equal(requests[1].url, '/api/sequence?refresh=1');
+  assert.equal(requests[1].url, '/api/prepare?refresh=1');
   assert.equal(requests[1].body.ra_deg, 240);
 
   listeners.change.forEach(listener => listener({ target: { dataset: { range: 'from' }, value: '2025-05-08' } }));
@@ -231,7 +251,7 @@ test('partial real frames can be refreshed and an empty local date filter can se
   assert.doesNotMatch(app.innerHTML, /Loading real image/);
   click('search-date-range');
   await flush();
-  assert.equal(requests[2].url, '/api/sequence?refresh=1');
+  assert.equal(requests[2].url, '/api/prepare?refresh=1');
   assert.deepEqual([requests[2].body.start_date, requests[2].body.end_date],
     ['2025-05-08', '2025-05-08']);
   assert.match(app.innerHTML, /8 May 2025|May 8, 2025/);

@@ -176,7 +176,7 @@ function stableSourceKey(url) {
   return hash.toString(16).padStart(16, '0');
 }
 
-export function normalizeSequencePatch(manifest, requestedTarget, requestedBand, queryRange, requestedFov = null, { bundledExample = false } = {}) {
+export function normalizeSequencePatch(manifest, requestedTarget, requestedBand, queryRange, requestedFov = null, { bundledExample = false, preserveSelectedFrames = false } = {}) {
   if (!manifest || typeof manifest !== 'object' ||
       !['ready', 'partial', 'empty'].includes(manifest.status) ||
       !manifest.request || manifest.request.band !== `D${requestedBand}` ||
@@ -206,6 +206,8 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
   const warnings = (Array.isArray(manifest.limitations) ? manifest.limitations : [])
     .filter(value => typeof value === 'string' && value.trim())
     .map(value => value.trim());
+  const zoomMissingOuterCount = validCount(manifest.zoom_missing_outer_count) || 0;
+  if (zoomMissingOuterCount) warnings.unshift(`Outer sky pixels could not be loaded from ${zoomMissingOuterCount} selected parent exposure${zoomMissingOuterCount === 1 ? '' : 's'}. The transparent mask is retained.`);
   const qualityWarning = 'Instrument quality flags have not yet been applied.';
   if (!warnings.includes(qualityWarning)) warnings.unshift(qualityWarning);
   if (failures) warnings.unshift(`${failures} observation${failures === 1 ? '' : 's'} could not be used (load or coverage issue).`);
@@ -214,6 +216,9 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
   // an edge-only cutout whose center may be blank. New builds validate the
   // center explicitly; keep old snapshots from presenting a black crosshair.
   const usableFrames = manifest.frames.filter(frame => {
+    // A zoom retains its previously selected parent exposures, including
+    // uncovered edges in a wider field. Their transparent masks remain visible.
+    if (preserveSelectedFrames) return true;
     const coverage = frame?.coverage_fraction;
     return typeof coverage !== 'number' ||
       coverage >= 0.25 && !(coverage < 0.5 && frame.center_wavelength_um == null);
@@ -226,14 +231,14 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
   const frames = usableFrames.map(frame => {
     if (!frame || frame.band !== `D${requestedBand}` ||
         typeof frame.image_url !== 'string' ||
-        !(/^\/outputs\/[a-f0-9]{32}\/frame_\d+\.png$/.test(frame.image_url) ||
+        !(/^\/outputs\/[a-f0-9]{32}\/(?:zoom_\d{3}\/)?frame_\d+\.png$/.test(frame.image_url) ||
           bundledExample && REAL_EXAMPLE_IMAGE.test(frame.image_url)) ||
         typeof frame.source_url !== 'string' || !/^https:\/\//.test(frame.source_url)) {
       throw new PatchDataError('invalid_response', 'The backend returned incomplete image metadata.');
     }
     const observedAt = utcObservationTime(frame.date_utc);
     const flags = [{ code: 'quality_unchecked', label: qualityWarning }];
-    if (manifest.status === 'partial') {
+    if (manifest.status === 'partial' && (failures || manifest.archive_listing_partial || !zoomMissingOuterCount)) {
       flags.push({ code: 'partial_sequence', label: failures
         ? 'Some observations could not be used for this sequence.'
         : manifest.archive_listing_partial
@@ -242,19 +247,36 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
     }
     const coverage = Number(frame.coverage_fraction);
     if (Number.isFinite(coverage) && coverage >= 0 && coverage < 0.999) {
-      flags.push({ code: 'partial_coverage', label: `This image covers ${Math.round(coverage * 100)}% of the requested field.` });
+      flags.push({ code: 'partial_coverage', label: `Loaded ${manifest.request.fov_arcmin}′ raster coverage: ${Math.round(coverage * 100)}%. The displayed zoom may cover a different fraction.` });
+    }
+    if (frame.zoom_outer_region_status === 'unavailable') {
+      flags.push({ code: 'zoom_outer_unavailable', label:
+        typeof frame.zoom_note === 'string' && frame.zoom_note.trim()
+          ? frame.zoom_note.trim() : 'The same parent exposure could not supply outer pixels; they remain transparent.' });
     }
     const wavelength = frame.center_wavelength_um == null ? NaN : Number(frame.center_wavelength_um);
+    const sourceUrl = frame.source_url;
+    const productId = typeof frame.product_id === 'string' && frame.product_id
+      ? frame.product_id : new URL(sourceUrl).pathname.split('/').pop() || sourceUrl;
     return {
       dateId: `${observedAt}#${stableSourceKey(frame.source_url)}`,
       band: requestedBand,
+      observedAt,
+      sourceUrl,
+      productId,
+      detector: frame.detector || `SPHEREx-D${requestedBand}`,
+      frameIndex: frame.index,
+      pixelDimensions: frame.pixel_dimensions || null,
+      nativeCutoutDimensions: frame.zoom_native_cutout_dimensions || frame.native_cutout_dimensions || null,
+      skyFootprint: frame.sky_footprint || null,
       wavelengthUm: Number.isFinite(wavelength) && wavelength > 0 ? wavelength : null,
       imageUrl: frame.image_url,
       flags,
-      observationId: '',
+      observationId: productId,
       pipelineVersion: '',
-      archiveUrl: typeof frame.cutout_url === 'string' && /^https:\/\//.test(frame.cutout_url)
-        ? frame.cutout_url : frame.source_url,
+      archiveUrl: typeof frame.zoom_cutout_url === 'string' && /^https:\/\//.test(frame.zoom_cutout_url)
+        ? frame.zoom_cutout_url : typeof frame.cutout_url === 'string' && /^https:\/\//.test(frame.cutout_url)
+          ? frame.cutout_url : frame.source_url,
     };
   });
   const ids = new Set(frames.map(frame => frame.dateId));
@@ -271,6 +293,7 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
     };
   });
   const pixelCount = Number(manifest.grid?.width_pixels);
+  const pixelHeight = Number(manifest.grid?.height_pixels);
   const pixelScale = Number(manifest.grid?.pixel_scale_arcsec);
   return {
     source: 'real',
@@ -283,18 +306,174 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
     dates,
     bands: BAND_INFO.map(band => ({ ...band })),
     frames,
+    sequenceId: typeof manifest.sequence_id === 'string' && /^[a-f0-9]{32}$/.test(manifest.sequence_id)
+      ? manifest.sequence_id : null,
+    baseFovArcmin: Number(manifest.request.fov_arcmin),
+    grid: {
+      widthPixels: Number.isFinite(pixelCount) && pixelCount > 0 ? pixelCount : null,
+      heightPixels: Number.isFinite(pixelHeight) && pixelHeight > 0 ? pixelHeight : null,
+      wcsHeader: manifest.grid?.wcs_header || '',
+      skyFootprint: manifest.grid?.sky_footprint || null,
+    },
+    display: manifest.display || null,
     sizePx: Number.isFinite(pixelCount) && pixelCount > 0 ? pixelCount : null,
     pixelScaleArcsec: Number.isFinite(pixelScale) && pixelScale > 0 ? pixelScale : null,
-    fovMaxArcmin: 20,
+    fovMaxArcmin: bundledExample ? Number(manifest.request.fov_arcmin) : 20,
     orientation: manifest.grid?.orientation || 'north up, east left',
     releaseDate: '',
     queryRange,
     warnings,
     failureCount: failures,
+    zoomMissingOuterCount,
     candidateCount: validCount(manifest.candidate_count),
     attemptedCount: validCount(manifest.attempted_count),
     skippedCount: validCount(manifest.skipped_count),
   };
+}
+
+// Retrieve a different display field from the same persisted parent exposures.
+// This endpoint performs no archive search or candidate selection. Reject any
+// unexpected replacement rather than silently showing a different observation.
+async function fetchZoomManifest(sequenceId, fov, signal, fetchImpl, refresh = false) {
+  if (!/^[a-f0-9]{32}$/.test(sequenceId || '')) {
+    throw new PatchDataError('zoom_unavailable', 'The parent exposure sequence is unavailable.');
+  }
+  const requestedFov = positiveFov(fov);
+  let response;
+  try {
+    response = await fetchImpl(refresh ? '/api/zoom?refresh=1' : '/api/zoom', {
+      method: 'POST', signal,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sequence_id: sequenceId, fov_arcmin: requestedFov }),
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error;
+    throw new PatchDataError('zoom_unavailable', 'Could not load this width from the same exposures. Your current image remains selected.', error);
+  }
+  if (!response.ok) {
+    let message = '';
+    try { const failure = await response.json(); message = failure?.message || failure?.detail || ''; }
+    catch { /* The proxy may send HTML. */ }
+    throw new PatchDataError('zoom_unavailable', typeof message === 'string' && message ||
+      'Could not load this width from the same exposures. Your current image remains selected.');
+  }
+  let manifest;
+  try { manifest = await response.json(); }
+  catch (error) { throw new PatchDataError('zoom_unavailable', 'The zoom response was incomplete.', error); }
+  if (manifest?.sequence_id !== sequenceId) {
+    throw new PatchDataError('zoom_changed_selection', 'The zoom response used another exposure sequence.');
+  }
+  return manifest;
+}
+
+export async function fetchZoomedRealPatch({ patch, fov, refresh = false, signal, fetchImpl = fetch }) {
+  if (patch?.source !== 'real' || patch.bundledRealExample || !patch.sequenceId) {
+    throw new PatchDataError('zoom_unavailable', 'This saved view cannot expand without its parent exposures.');
+  }
+  const requestedFov = positiveFov(fov);
+  const manifest = await fetchZoomManifest(patch.sequenceId, requestedFov, signal, fetchImpl, refresh);
+  const zoomed = normalizeSequencePatch(manifest, patch.target,
+    Number(patch.frames[0]?.band), patch.queryRange, requestedFov,
+    { preserveSelectedFrames: true });
+  if (zoomed.sequenceId !== patch.sequenceId || zoomed.frames.length !== patch.frames.length ||
+      zoomed.frames.some((frame, i) => frame.dateId !== patch.frames[i].dateId ||
+        frame.sourceUrl !== patch.frames[i].sourceUrl ||
+        frame.detector !== patch.frames[i].detector ||
+        frame.wavelengthUm !== patch.frames[i].wavelengthUm) ||
+      JSON.stringify(zoomed.display) !== JSON.stringify(patch.display)) {
+    throw new PatchDataError('zoom_changed_selection',
+      'The zoom result changed the selected observations or brightness scale. The original view is still selected.');
+  }
+  return zoomed;
+}
+
+// Shared URLs carry their selected sequence ID so reloading a zoomed patch
+// cannot quietly start a new archive search at a different field size.
+export async function restoreRealSequence({ sequenceId, ra, dec, band, fov, signal, fetchImpl = fetch }) {
+  const coords = parseCoordinates(ra, dec);
+  if (!coords.isValid) throw new PatchDataError('invalid_request', coords.raError || coords.decError);
+  if (!Number.isInteger(band) || band < 1 || band > 6) {
+    throw new PatchDataError('invalid_request', 'Choose a detector band from 1 through 6.');
+  }
+  const manifest = await fetchZoomManifest(sequenceId, fov, signal, fetchImpl);
+  const queryRange = { from: manifest.request?.start_date, to: manifest.request?.end_date };
+  return normalizeSequencePatch(manifest, coords, band, queryRange, positiveFov(fov),
+    { preserveSelectedFrames: true });
+}
+
+const PREPARATION_BANDS = Object.freeze(['D1', 'D2', 'D3', 'D4', 'D5', 'D6']);
+
+function preparationPayload(payload, jobId) {
+  if (!payload || payload.job_id !== jobId ||
+      !['running', 'complete'].includes(payload.status) ||
+      payload.canonical_fov_arcmin !== 20 ||
+      !payload.bands || typeof payload.bands !== 'object' ||
+      !PREPARATION_BANDS.every(band => payload.bands[band] &&
+        ['queued', 'running', 'ready', 'partial', 'empty', 'unavailable'].includes(payload.bands[band].status))) {
+    throw new PatchDataError('invalid_response', 'The detector preparation response is incomplete.');
+  }
+  return payload;
+}
+
+export async function prepareRealBands({ ra, dec, band = 4, from = '', to = '', refresh = false, signal,
+  onProgress = () => {}, fetchImpl = fetch, timeoutMs = 130_000, wait = waitForAvailableBuild } = {}) {
+  const target = parseCoordinates(ra, dec);
+  if (!target.isValid) throw new PatchDataError('invalid_request', target.raError || target.decError);
+  if (!Number.isInteger(band) || band < 1 || band > 6) {
+    throw new PatchDataError('invalid_request', 'Choose a detector band from 1 through 6.');
+  }
+  const [start, end] = orderedRange(from || MISSION_START, to || new Date().toISOString().slice(0, 10));
+  const body = { ra_deg: target.raDeg, dec_deg: target.decDeg,
+    start_date: start, end_date: end, band: `D${band}` };
+  let response;
+  try {
+    response = await fetchImpl(refresh ? '/api/prepare?refresh=1' : '/api/prepare', { method: 'POST', signal,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) });
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error;
+    throw new PatchDataError('backend_unavailable', 'Could not start six-band preparation.', error);
+  }
+  if (!response.ok) {
+    let message = '';
+    try { message = (await response.json())?.detail || ''; } catch { /* Proxy may send HTML. */ }
+    const code = response.status === 502 && /IRSA|archive|SPHEREx image search/i.test(message)
+      ? 'archive_unavailable' : 'backend_unavailable';
+    throw new PatchDataError(code, typeof message === 'string' && message ||
+      `Six-band preparation returned HTTP ${response.status}.`);
+  }
+  let payload;
+  try { payload = await response.json(); }
+  catch (error) { throw new PatchDataError('invalid_response', 'Could not read six-band preparation.', error); }
+  const jobId = payload?.job_id;
+  if (!/^[a-f0-9]{32}$/.test(jobId || '')) {
+    throw new PatchDataError('invalid_response', 'The preparation job did not return an ID.');
+  }
+  payload = preparationPayload(payload, jobId);
+  onProgress(payload);
+  const deadline = Date.now() + timeoutMs;
+  while (payload.status !== 'complete' && Date.now() < deadline) {
+    await wait(Math.min(1000, Math.max(1, deadline - Date.now())), signal);
+    try {
+      response = await fetchImpl(`/api/prepare/${jobId}`, { signal, headers: { Accept: 'application/json' } });
+    } catch (error) {
+      if (error?.name === 'AbortError') throw error;
+      throw new PatchDataError('backend_unavailable', 'Could not check detector preparation.', error);
+    }
+    if (!response.ok) throw new PatchDataError('backend_unavailable', `Detector preparation returned HTTP ${response.status}.`);
+    try { payload = preparationPayload(await response.json(), jobId); }
+    catch (error) { throw error instanceof PatchDataError ? error :
+      new PatchDataError('invalid_response', 'Could not read detector preparation.', error); }
+    onProgress(payload);
+  }
+  return { payload, timedOut: payload.status !== 'complete', target,
+    queryRange: { from: start, to: end } };
+}
+
+export function preparedBandPatch(entry, { target, band, queryRange }) {
+  if (!entry || !['ready', 'partial'].includes(entry.status) || !entry.manifest) return null;
+  const patch = normalizeSequencePatch(entry.manifest, target, band, queryRange, 20);
+  return patch.status === 'ok' ? patch : null;
 }
 
 // A fixed, clearly identified sample of actual SPHEREx cutouts. This is an

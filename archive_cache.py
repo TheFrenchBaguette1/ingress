@@ -1,4 +1,4 @@
-"""Reuse successful IRSA observation listings across detector-band searches."""
+"""Cache exact SIA listings, and share only an unfiltered listing across bands."""
 
 import hashlib
 import json
@@ -105,8 +105,9 @@ def cached_search_observations(
 ):
     """Return a private copy of an exact sky/UTC query's observation table.
 
-    The SIA listing includes all detector bands. A new band needs new FITS
-    cutouts, but does not need another identical archive metadata request.
+    A SIA query with BAND is an overlap test and can omit other detectors.
+    Only an unfiltered listing for the same sky, time, and collections can
+    serve another band. The sequence builder filters detector names exactly.
     Failed queries are never stored, and callers cannot mutate cache entries.
     """
     key = (
@@ -114,13 +115,14 @@ def cached_search_observations(
         float(search_radius_arcsec), tuple(collections),
         start_time.isot, end_time.isot, band,
     )
-    # Earlier versions saved unfiltered all-detector listings under the same
-    # six-part key without `band`. These are still valid for any detector and
-    # particularly useful during an archive outage.
+    # An explicit unfiltered query is stored with band=None. Older versions
+    # saved unfiltered listings with a six-part key instead. A band-filtered
+    # listing must never be used as proof that another detector is empty.
+    shared_key = key[:-1] + (None,) if band is not None else None
     legacy_key = key[:-1] if band is not None else None
     if not refresh:
         with _lock:
-            for candidate_key in (key, legacy_key):
+            for candidate_key in (key, shared_key, legacy_key):
                 if candidate_key is None:
                     continue
                 cached = _listings.get(candidate_key)
@@ -136,6 +138,8 @@ def cached_search_observations(
                 return reused
 
         saved = _read_disk_listing(key)
+        if saved is None and shared_key is not None:
+            saved = _read_disk_listing(shared_key)
         if saved is None and legacy_key is not None:
             saved = _read_disk_listing(legacy_key)
         if saved is not None:
@@ -151,8 +155,10 @@ def cached_search_observations(
     results = fetch(*args, band=band) if band is not None else fetch(*args)
     # A sampled fallback is useful for this request, but caching it as a full
     # listing could hide later observations after IRSA recovers.
-    if (isinstance(results, Table) and 0 < len(results) <= MAX_CACHED_ROWS
-            and not results.meta.get("archive_listing_partial")):
+    overflow = (isinstance(results, Table) and
+                str(results.meta.get("QUERY_STATUS", "")).upper() == "OVERFLOW")
+    if (isinstance(results, Table) and 0 < len(results) < MAX_CACHED_ROWS
+            and not overflow and not results.meta.get("archive_listing_partial")):
         with _lock:
             _listings[key] = (results.copy(copy_data=True), unix_time())
             _listings.move_to_end(key)
@@ -161,3 +167,17 @@ def cached_search_observations(
         _write_disk_listing(key, results)
         return results.copy(copy_data=True)
     return results
+
+
+def warm_all_band_listing(coord, search_radius_arcsec, collections,
+                          start_time, end_time, fetch, *, refresh=False):
+    """Fetch a complete SIA listing without BAND for a single shared query.
+
+    Call before preparing multiple detectors. A failed or sampled listing is
+    not cached as complete, and subsequent per-band requests can still make
+    their own targeted queries.
+    """
+    return cached_search_observations(
+        coord, search_radius_arcsec, collections, start_time, end_time,
+        fetch, band=None, refresh=refresh,
+    )

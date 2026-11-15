@@ -105,7 +105,7 @@ h1, h2, h3, p { margin-top: 0; }
 .image-watermark { position: absolute; top: 0; left: 0; right: 0; z-index: 2; padding: 7px 4px; color: #f1bb4a; background: #0b0d10df; font: 600 clamp(.54rem,1.1vw,.71rem) 'IBM Plex Mono',monospace; letter-spacing: .06em; text-align: center; }
 .compass { position: absolute; right: 12px; top: 35px; z-index: 3; color: #e9ebed; font: .8rem 'IBM Plex Mono',monospace; line-height: 1; text-align: center; text-shadow: 0 1px 3px #000; }
 .compass span { display: block; margin: 1px; }
-.crosshair { position: absolute; width: 37px; height: 37px; left: 50%; top: 50%; transform: translate(-50%,-50%); border: 1px solid #e9ebedc0; border-radius: 50%; pointer-events: none; }
+.crosshair { position: absolute; z-index: 2; width: 37px; height: 37px; left: 50%; top: 50%; transform: translate(-50%,-50%); border: 1px solid #e9ebedc0; border-radius: 50%; pointer-events: none; }
 .crosshair:before, .crosshair:after { content: ''; position: absolute; background: #e9ebedc0; }
 .crosshair:before { width: 66px; height: 1px; left: -15px; top: 17px; clip-path: polygon(0 0,24% 0,24% 100%,76% 100%,76% 0,100% 0); }
 .crosshair:after { width: 1px; height: 66px; left: 17px; top: -15px; clip-path: polygon(0 0,100% 0,100% 24%,0 24%,0 76%,100% 76%,100% 100%,0 100%); }

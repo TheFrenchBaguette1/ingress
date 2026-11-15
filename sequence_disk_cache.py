@@ -7,6 +7,7 @@ from itertools import islice
 from time import time
 
 from PIL import Image
+import numpy as np
 
 import config
 
@@ -75,8 +76,12 @@ def _intact_png(path):
 
 
 def intact_saved_frames(manifest, output_root):
-    """Verify that each frame belongs to this sequence and is a readable PNG."""
+    """Verify both PNG previews and aligned floats needed for trustworthy zoom."""
     if not cacheable_sequence(manifest):
+        return False
+    # Old cached PNG-only sequences cannot preserve science values or masks
+    # while zooming. Rebuild them from the actual archive before reusing them.
+    if manifest.get("science_format") != "aligned-npy-v1":
         return False
     sequence_id = manifest.get("sequence_id", "")
     if not isinstance(sequence_id, str) or not re.fullmatch(r"[a-f0-9]{32}", sequence_id):
@@ -84,7 +89,13 @@ def intact_saved_frames(manifest, output_root):
     folder = output_root / sequence_id
     if folder.resolve().parent != output_root.resolve():
         return False
-    for frame in manifest["frames"]:
+    grid = manifest.get("grid")
+    if not isinstance(grid, dict):
+        return False
+    shape = (grid.get("height_pixels"), grid.get("width_pixels"))
+    if not all(isinstance(value, int) and 2 <= value <= 600 for value in shape):
+        return False
+    for index, frame in enumerate(manifest["frames"]):
         if not isinstance(frame, dict):
             return False
         image_url = str(frame.get("image_url", ""))
@@ -98,10 +109,31 @@ def intact_saved_frames(manifest, output_root):
         if (image_path.resolve().parent != folder.resolve()
                 or not _intact_png(image_path)):
             return False
+        science_file = f"science_{index:03d}.npy"
+        if frame.get("science_file") != science_file:
+            return False
+        science_path = folder / science_file
+        try:
+            if (science_path.resolve().parent != folder.resolve()
+                    or science_path.stat().st_size > 8 * 600 * 600 + 4096):
+                return False
+            science = np.load(science_path, mmap_mode="r", allow_pickle=False)
+            if science.shape != shape or science.dtype != np.dtype("float64"):
+                return False
+            height, width = shape
+            if not np.isfinite(science[(height - 1)//2:height//2+1,
+                                       (width - 1)//2:width//2+1]).all():
+                return False
+            with Image.open(image_path) as preview:
+                alpha_missing = np.asarray(preview)[::-1, :, 3] == 0
+            if not np.array_equal(alpha_missing, ~np.isfinite(science)):
+                return False
+        except (OSError, ValueError, TypeError):
+            return False
     return True
 
 
-def find_saved_sequence(request, output_root):
+def find_saved_sequence(request, output_root, *, deadline=None):
     """Find an intact completed sequence for this exact request, if available.
 
     Builds with actual frames write their manifest and PNGs under output/.
@@ -131,6 +163,16 @@ def find_saved_sequence(request, output_root):
                 or (manifest["status"] == "partial" and age_seconds >= PARTIAL_TTL_SECONDS)
             ):
                 continue
+            if manifest.get("science_format") != "aligned-npy-v1":
+                # Older deployments saved only display PNGs. Recover the
+                # original selected FITS products (without a new SIA listing)
+                # before treating a cached answer as zoomable science data.
+                from zoom import ZoomUnavailable, backfill_legacy_sequence
+                try:
+                    manifest = backfill_legacy_sequence(path.parent, manifest, deadline=deadline)
+                    age_seconds = time() - path.stat().st_mtime
+                except ZoomUnavailable:
+                    continue
             if not intact_saved_frames(manifest, output_root):
                 continue
             # Keep the on-disk record intact; the response states its age.

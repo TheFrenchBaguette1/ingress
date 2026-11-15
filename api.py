@@ -1,5 +1,6 @@
 import logging
 import json
+import re
 from collections import OrderedDict
 from threading import Lock
 from time import time
@@ -15,6 +16,8 @@ from sequence_disk_cache import (
     PARTIAL_TTL_SECONDS, cacheable_sequence, find_saved_sequence, intact_saved_frames,
     mark_cached_sequence,
 )
+from prepare import PrepareRequest, get_prepare, start_prepare
+from zoom import ZoomRequest, ZoomUnavailable, build_zoom
 
 
 app = FastAPI(title="Ingress Backend")
@@ -40,6 +43,7 @@ build_lock = Lock()
 cache_lock = Lock()
 sequence_cache = OrderedDict()
 MAX_CACHED_SEQUENCES = 32
+zoom_lock = Lock()
 
 
 def remember_sequence(key, result, created_at=None):
@@ -116,3 +120,33 @@ def create_sequence(request: SequenceRequest, refresh: bool = False):
 
     finally:
         build_lock.release()
+
+
+@app.post("/zoom")
+def zoom_sequence(request: ZoomRequest, refresh: bool = False):
+    # A concurrent zoom of the same sequence may write the same PNG paths.
+    # Waiting here is safe; this never starts another archive index search.
+    with zoom_lock:
+        try:
+            return build_zoom(request, refresh=refresh)
+        except ZoomUnavailable as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except Exception:
+            logging.exception("Sequence zoom failed.")
+            raise HTTPException(status_code=502, detail="Could not zoom this sequence. Check the backend terminal.")
+
+
+@app.post("/prepare")
+def prepare_bands(request: PrepareRequest, refresh: bool = False):
+    """Start one bounded 20′ real-image job; the requested detector runs first."""
+    return start_prepare(request, refresh=refresh)
+
+
+@app.get("/prepare/{job_id}")
+def prepare_status(job_id: str):
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise HTTPException(status_code=404, detail="Unknown preparation job.")
+    result = get_prepare(job_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Preparation job has expired. Start it again.")
+    return result

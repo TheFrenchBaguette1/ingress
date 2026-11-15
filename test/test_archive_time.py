@@ -26,6 +26,9 @@ class ArchiveTimeTests(unittest.TestCase):
         probe = patch("archive._outage_probe", False)
         until.start()
         probe.start()
+        tap = patch("archive._tap_lookup", return_value=None)
+        tap.start()
+        self.addCleanup(tap.stop)
         self.addCleanup(probe.stop)
         self.addCleanup(until.stop)
 
@@ -55,7 +58,8 @@ class ArchiveTimeTests(unittest.TestCase):
         empty = sentinel[:0]
         with (
             patch("archive._BoundedIrsa.query_sia", side_effect=[
-                RuntimeError("502 Bad Gateway"), sentinel, empty, empty, empty,
+                RuntimeError("502 Bad Gateway"), Timeout("center timed out"),
+                sentinel, empty, empty, empty,
             ]) as query,
         ):
             result = search_observations(
@@ -63,7 +67,7 @@ class ArchiveTimeTests(unittest.TestCase):
             )
         self.assertEqual(len(result), 1)
         self.assertFalse(result.meta.get("archive_listing_partial"))
-        self.assertEqual(query.call_count, 5)
+        self.assertEqual(query.call_count, 6)
         self.assertEqual(query.call_args_list[0].kwargs["time"], (start, end))
         lower, upper = query.call_args.kwargs["band"]
         self.assertAlmostEqual(lower.to_value(u.um), 1.636)
@@ -78,11 +82,12 @@ class ArchiveTimeTests(unittest.TestCase):
             names=["t_min", "energy_bandpassname", "access_url"],
         )
         with patch("archive._BoundedIrsa.query_sia", side_effect=[
-            Timeout("read timed out"), rows, Timeout("read timed out"),
+            Timeout("read timed out"), Timeout("center timed out"),
+            rows, Timeout("read timed out"),
             rows[:0], rows[:0],
         ]) as query:
             result = search_observations(coord, 850, ["spherex_dr1"], start, end, band="D3")
-        self.assertEqual(query.call_count, 5)
+        self.assertEqual(query.call_count, 6)
         self.assertEqual(len(result), 1)
         self.assertTrue(result.meta["archive_listing_partial"])
         self.assertIn("3 of 4", result.meta["archive_listing_window_note"])
@@ -122,7 +127,7 @@ class ArchiveTimeTests(unittest.TestCase):
             self.assertRaises(ArchiveUnavailable),
         ):
             search_observations(coord, 850, ["spherex_dr1"], start, end, band="D3")
-        self.assertEqual(query.call_count, 5)
+        self.assertEqual(query.call_count, 6)
         self.assertEqual(__import__("archive")._outage_until, 0.0)
 
     def test_confirmed_outage_short_circuits_then_recovers(self):

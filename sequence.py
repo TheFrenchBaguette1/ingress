@@ -2,8 +2,10 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from math import ceil, sqrt
+from pathlib import PurePosixPath
 from time import monotonic
 from typing import Literal
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import numpy as np
@@ -86,6 +88,37 @@ def finite_number(value):
     return value if np.isfinite(value) else None
 
 
+def product_id_for_source(source_url):
+    """Keep the archive's FITS filename as a stable, inspectable product ID."""
+    return PurePosixPath(urlsplit(source_url).path).name
+
+
+def sky_footprint(output_wcs, shape):
+    """Requested grid's four WCS edge corners, in RA/Dec degrees."""
+    height, width = shape
+    x = [-0.5, width - 0.5, width - 0.5, -0.5]
+    y = [-0.5, -0.5, height - 0.5, height - 0.5]
+    ra, dec = output_wcs.pixel_to_world_values(x, y)
+    return [
+        {"ra_deg": float(a), "dec_deg": float(d)}
+        for a, d in zip(ra, dec)
+    ]
+
+
+def write_display_png(science, filename, display):
+    """Apply one fixed sequence stretch, with the original NaN mask as alpha."""
+    norm = ImageNormalize(
+        vmin=display["vmin"], vmax=display["vmax"],
+        stretch=AsinhStretch(a=display["stretch_a"]), clip=True,
+    )
+    cmap = colormaps["gray"].copy()
+    cmap.set_bad((0, 0, 0, 0))
+    rgba = np.asarray(cmap(norm(np.ma.masked_invalid(science)), bytes=True)).copy()
+    rgba[~np.isfinite(science), 3] = 0
+    # Astronomical image rows start at the south edge; PNG rows start at top.
+    Image.fromarray(np.flipud(rgba).copy()).save(filename)
+
+
 def time_spread_indexes(times, count):
     """Try distinct epochs first, then fill the largest gaps if they fail."""
     if len(times) <= count:
@@ -109,7 +142,7 @@ def time_spread_indexes(times, count):
 
 # ---------- Sequence generation ----------
 
-def build_sequence(request, *, refresh=False):
+def build_sequence(request, *, refresh=False, deadline=None):
     coord = SkyCoord(
         request.ra_deg,
         request.dec_deg,
@@ -132,7 +165,7 @@ def build_sequence(request, *, refresh=False):
 
     # Search a circle enclosing the requested square field.
     search_radius_arcsec = request.fov_arcmin * 60 / sqrt(2)
-    deadline = monotonic() + config.MAX_BUILD_SECONDS
+    deadline = min(deadline, monotonic() + config.MAX_BUILD_SECONDS) if deadline is not None else monotonic() + config.MAX_BUILD_SECONDS
 
     # The user may enter dates before launch or in the future. Preserve that
     # requested interval in the manifest, but avoid searching empty years.
@@ -335,6 +368,9 @@ def build_sequence(request, *, refresh=False):
                         "center_wavelength_um": wavelength,
                         "center_bandwidth_um": bandwidth,
                         "coverage_fraction": coverage,
+                        "native_cutout_dimensions": {
+                            "width": int(width), "height": int(height),
+                        },
                         "source_url": source_url,
                         "cutout_url": cutout["cutout_url"],
                     })
@@ -356,6 +392,13 @@ def build_sequence(request, *, refresh=False):
                     print(f"  FAILED: {message}", flush=True)
 
     frames.sort(key=lambda frame: frame["time_mjd"])
+
+    budget_exhausted = monotonic() >= deadline and attempted_count < total_candidates
+    if budget_exhausted and not frames:
+        raise ArchiveUnavailable(
+            "The preparation time budget ended before any verified image "
+            "could be built for this detector. Try a narrower date interval."
+        )
 
     if not frames and results.meta.get("archive_listing_partial"):
         raise ArchiveUnavailable(
@@ -393,47 +436,7 @@ def build_sequence(request, *, refresh=False):
         if vmax <= vmin:
             vmax = vmin + max(abs(vmin) * 1e-6, 1e-12)
 
-        norm = ImageNormalize(
-            vmin=float(vmin),
-            vmax=float(vmax),
-            stretch=AsinhStretch(a=0.1),
-            clip=True,
-        )
-
-        cmap = colormaps["gray"].copy()
-        cmap.set_bad((0, 0, 0, 0))
-
         first_time = frames[0]["time_mjd"]
-
-        for index, frame in enumerate(frames):
-            filename = f"frame_{index:03d}.png"
-
-            masked = np.ma.masked_invalid(frame["image"])
-            rgba = np.asarray(cmap(norm(masked), bytes=True)).copy()
-            # ImageNormalize can drop the masked-array mask. Set alpha from
-            # the aligned image explicitly so uncovered sky is never shown
-            # as a bright pixel in the exported PNG.
-            rgba[~np.isfinite(frame["image"]), 3] = 0
-
-            # Image arrays have north at the upper end of the y axis.
-            # Flip rows when writing a PNG with a top-left origin.
-            Image.fromarray(np.flipud(rgba).copy()).save(
-                output_dir / filename
-            )
-
-            metadata = {
-                key: value
-                for key, value in frame.items()
-                if key != "image"
-            }
-
-            metadata.update({
-                "index": index,
-                "image_url": f"/outputs/{sequence_id}/{filename}",
-                "elapsed_days": frame["time_mjd"] - first_time,
-            })
-
-            exported_frames.append(metadata)
 
         display = {
             "brightness_unit": brightness_unit,
@@ -444,9 +447,37 @@ def build_sequence(request, *, refresh=False):
             "missing_pixels": "transparent",
         }
 
+        for index, frame in enumerate(frames):
+            filename = f"frame_{index:03d}.png"
+            # The PNG is a visualization, not the science data. Keep the
+            # original aligned floats and NaN mask for lossless zoom crops.
+            science_file = f"science_{index:03d}.npy"
+            np.save(output_dir / science_file, np.asarray(frame["image"], dtype=np.float64),
+                    allow_pickle=False)
+            write_display_png(frame["image"], output_dir / filename, display)
+
+            metadata = {
+                key: value
+                for key, value in frame.items()
+                if key != "image"
+            }
+
+            metadata.update({
+                "index": index,
+                "image_url": f"/outputs/{sequence_id}/{filename}",
+                "science_file": science_file,
+                "product_id": product_id_for_source(frame["source_url"]),
+                "pixel_dimensions": {"width": shape[1], "height": shape[0]},
+                "sky_footprint": sky_footprint(output_wcs, shape),
+                "elapsed_days": frame["time_mjd"] - first_time,
+            })
+
+            exported_frames.append(metadata)
+
+
     if not frames:
         status = "empty"
-    elif failures or results.meta.get("archive_listing_partial"):
+    elif failures or results.meta.get("archive_listing_partial") or budget_exhausted:
         status = "partial"
     else:
         status = "ready"
@@ -468,6 +499,8 @@ def build_sequence(request, *, refresh=False):
         )
     if results.meta.get("archive_listing_partial"):
         limitations.insert(0, results.meta["archive_listing_window_note"])
+    if budget_exhausted:
+        limitations.insert(0, "Preparation time budget ended before all available exposure candidates were checked.")
     if total_candidates > attempted_count:
         limitations.insert(
             0,
@@ -483,6 +516,7 @@ def build_sequence(request, *, refresh=False):
         "request": request.model_dump(mode="json"),
         "date_policy": "UTC calendar dates; both selected days included",
         "selection_policy": "time-spread sample of individual exposures from the selected detector",
+        "science_format": "aligned-npy-v1",
         "candidate_count": total_candidates,
         "attempted_count": attempted_count,
         "skipped_count": total_candidates - attempted_count,
@@ -493,6 +527,7 @@ def build_sequence(request, *, refresh=False):
             "height_pixels": shape[0],
             "pixel_scale_arcsec": pixel_scale,
             "orientation": "north up, east left",
+            "sky_footprint": sky_footprint(output_wcs, shape),
             "wcs_header": output_wcs.to_header().tostring(
                 sep="\n",
                 endcard=False,

@@ -11,7 +11,10 @@ from astropy.coordinates import SkyCoord
 from astropy.table import Table
 from astropy.time import Time
 
-from archive_cache import _write_disk_listing, cached_search_observations, clear_archive_cache
+from archive_cache import (
+    _write_disk_listing, cached_search_observations, clear_archive_cache,
+    warm_all_band_listing,
+)
 from sequence import SequenceRequest, build_sequence
 
 
@@ -41,6 +44,46 @@ class ArchiveCacheTests(unittest.TestCase):
         self.assertEqual(fetch.call_count, 2)
         self.assertEqual(fetch.call_args.kwargs["band"], "D4")
 
+    def test_unfiltered_warm_listing_can_serve_each_band_after_restart(self):
+        coord = SkyCoord(12, 75, unit="deg")
+        start, end = Time("2025-05-01"), Time("2026-11-15")
+        listing = Table(
+            [[Time("2026-02-06").mjd, Time("2026-02-07").mjd],
+             ["SPHEREx-D1", "SPHEREx-D4"],
+             ["https://example.org/d1.fits", "https://example.org/d4.fits"]],
+            names=["t_min", "energy_bandpassname", "access_url"],
+        )
+        fetch = Mock(return_value=listing)
+        warm_all_band_listing(coord, 850, ["dr1", "qr3"], start, end, fetch)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(fetch.call_args.kwargs, {})  # No BAND constraint.
+        for band in ("D1", "D4"):
+            reused = cached_search_observations(
+                coord, 850, ["dr1", "qr3"], start, end, fetch, band=band,
+            )
+            self.assertTrue(reused.meta["archive_listing_cached"])
+            self.assertEqual(len(reused), 2)  # Downstream filters exact detector.
+        clear_archive_cache()
+        restored = cached_search_observations(
+            coord, 850, ["dr1", "qr3"], start, end, fetch, band="D1",
+        )
+        self.assertEqual(fetch.call_count, 1)
+        self.assertTrue(restored.meta["archive_listing_cached"])
+
+    def test_filtered_listing_cannot_claim_other_detector_empty(self):
+        coord = SkyCoord(12, 75, unit="deg")
+        start, end = Time("2025-05-01"), Time("2026-11-15")
+        d4_only = Table(
+            [[Time("2026-02-06").mjd], ["SPHEREx-D4"],
+             ["https://example.org/d4.fits"]],
+            names=["t_min", "energy_bandpassname", "access_url"],
+        )
+        fetch = Mock(side_effect=[d4_only, RuntimeError("D1 index unavailable")])
+        cached_search_observations(coord, 850, ["dr1"], start, end, fetch, band="D4")
+        with self.assertRaisesRegex(RuntimeError, "D1 index unavailable"):
+            cached_search_observations(coord, 850, ["dr1"], start, end, fetch, band="D1")
+        self.assertEqual(fetch.call_count, 2)
+
     def test_incomplete_listing_is_never_cached_as_full_coverage(self):
         coord = SkyCoord(180, -30, unit="deg")
         start, end = Time("2025-05-01"), Time("2026-11-15")
@@ -57,6 +100,21 @@ class ArchiveCacheTests(unittest.TestCase):
             )
             self.assertTrue(result.meta["archive_listing_partial"])
         self.assertEqual(fetch.call_count, 2)
+
+    def test_sia_overflow_is_not_reused_as_complete_all_band_listing(self):
+        coord = SkyCoord(12, 75, unit="deg")
+        start, end = Time("2025-05-01"), Time("2026-11-15")
+        listing = Table(
+            [[Time("2026-02-06").mjd], ["SPHEREx-D4"],
+             ["https://example.org/d4.fits"]],
+            names=["t_min", "energy_bandpassname", "access_url"],
+        )
+        listing.meta["QUERY_STATUS"] = "OVERFLOW"
+        fetch = Mock(return_value=listing)
+        warm_all_band_listing(coord, 850, ["dr1"], start, end, fetch)
+        cached_search_observations(coord, 850, ["dr1"], start, end, fetch, band="D1")
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(fetch.call_args.kwargs, {"band": "D1"})
 
     def test_old_unfiltered_listing_remains_usable_during_outage(self):
         coord = SkyCoord(180, -30, unit="deg")

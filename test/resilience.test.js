@@ -8,6 +8,18 @@ const archiveError = () => new Response(JSON.stringify({
 }), { status: 502 });
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
+function completePreparation(original, body) {
+  const manifest = structuredClone(original);
+  manifest.request = { ...body, fov_arcmin: 20 };
+  manifest.grid = { ...manifest.grid, width_pixels: 200, height_pixels: 200 };
+  const bands = Object.fromEntries(Array.from({ length: 6 }, (_, index) =>
+    [`D${index + 1}`, { status: 'empty' }]));
+  bands[body.band] = { status: manifest.status, manifest };
+  return new Response(JSON.stringify({ job_id: 'a'.repeat(32), status: 'complete',
+    requested_band: body.band, canonical_fov_arcmin: 20, bands,
+    completed_count: 6, total_count: 6 }), { status: 200 });
+}
+
 async function mount(url, fetchImpl) {
   const listeners = {};
   const windowListeners = {};
@@ -38,7 +50,7 @@ test('an exact failed live request can display only its matching saved real obse
         ? new Response(sample, { status: 200 }) : archiveError();
     });
   await flush(); await flush();
-  assert.deepEqual(calls.map(call => call.url), ['/api/sequence', './public/real-example/ra180-dec-30-d4/manifest.json']);
+  assert.deepEqual(calls.map(call => call.url), ['/api/prepare', './public/real-example/ra180-dec-30-d4/manifest.json']);
   assert.match(app.innerHTML, /Saved real SPHEREx observations/);
   assert.match(app.innerHTML, /fixed snapshot, not a live search or simulated images/);
   assert.match(app.innerHTML, /frame_000\.png/);
@@ -47,26 +59,22 @@ test('an exact failed live request can display only its matching saved real obse
 
   click('band', { band: '3' });
   await flush(); await flush();
-  assert.equal(calls.length, 3); // No narrower bundled replacement for Band 3.
-  assert.match(app.innerHTML, /Showing previously loaded real observations/);
-  assert.match(app.innerHTML, /new search \(Band 3, 5′ wide\) did not load/);
+  assert.equal(calls.length, 2); // The saved snapshot contains only Band 4.
+  assert.match(app.innerHTML, /data-band="3"[^>]*disabled/);
+  assert.doesNotMatch(app.innerHTML, /Band 3 did not load/);
   assert.equal(globalThis.location.searchParams.get('band'), '4');
-  click('retry-failed-query');
+  click('retry'); // The visible saved-example banner offers a live retry.
   await flush(); await flush();
   assert.equal(calls.length, 4);
-  assert.equal(calls[3].body.band, 'D3');
-  assert.match(app.innerHTML, /Showing previously loaded real observations/);
+  assert.equal(calls[2].url, '/api/prepare?refresh=1');
+  assert.equal(calls[2].body.band, 'D4');
+  assert.match(app.innerHTML, /Saved real SPHEREx observations/);
 
   click('fov', { fov: '20' });
   await flush(); await flush();
-  assert.equal(calls.length, 5);
-  assert.equal(calls[4].body.fov_arcmin, 20);
-  assert.match(app.innerHTML, /new search \(Band 4, 20′ wide\) did not load/);
-  assert.equal(globalThis.location.searchParams.get('fov'), '5');
-  click('retry-failed-query');
-  await flush(); await flush();
-  assert.equal(calls[5].body.fov_arcmin, 20);
-  assert.equal(calls.length, 6);
+  assert.equal(calls.length, 4); // The saved 5′ snapshot has no parent science pixels.
+  assert.match(app.innerHTML, /data-fov="20"[^>]*disabled/);
+  assert.match(app.innerHTML, /5′ wide/);
   assert.equal(globalThis.location.searchParams.get('fov'), '5');
 });
 
@@ -79,7 +87,7 @@ test('a 20-minute field never silently displays a 5-minute example, and a differ
         ? new Response(sample, { status: 200 }) : archiveError();
     });
   await flush(); await flush();
-  assert.deepEqual(calls.map(call => call.url), ['/api/sequence']);
+  assert.deepEqual(calls.map(call => call.url), ['/api/prepare']);
   assert.match(app.innerHTML, /Could not load this patch/);
   assert.match(app.innerHTML, /View saved real observations at RA 180°, Dec −30° \(5′\)/);
   assert.doesNotMatch(app.innerHTML, /frame_000\.png/);
@@ -117,15 +125,16 @@ test('a partial real sequence can probe the archive again and gives a truthful c
   const { app, click } = await mount('http://localhost:5173/?ra=180&dec=-30&band=4&fov=5&from=2025-05-01&to=2026-11-15',
     async (_url, options) => {
       calls++;
-      assert.equal(JSON.parse(options.body).band, 'D4');
-      return new Response(JSON.stringify(partial), { status: 200 });
+      const body = JSON.parse(options.body);
+      assert.equal(body.band, 'D4');
+      return completePreparation(partial, body);
     });
   await flush();
   assert.equal(calls, 1);
   assert.match(app.innerHTML, /Partial date coverage/);
   assert.doesNotMatch(app.innerHTML, /0 exposures could not be loaded/);
   assert.doesNotMatch(app.innerHTML, /Some observations could not be loaded for this sequence/);
-  click('retry');
+  click('refresh-observations');
   await flush();
   assert.equal(calls, 2);
 });
@@ -138,17 +147,17 @@ test('a failed refresh keeps a live real sequence instead of replacing it with t
   }
   let calls = 0;
   const { app, click } = await mount('http://localhost:5173/?ra=180&dec=-30&band=4&fov=5&from=2025-05-01&to=2026-11-15',
-    async url => {
+    async (url, options) => {
       calls++;
-      assert.equal(url, '/api/sequence');
-      return calls === 1 ? new Response(JSON.stringify(live), { status: 200 }) : archiveError();
+      assert.equal(url, calls === 1 ? '/api/prepare' : '/api/prepare?refresh=1');
+      return calls === 1 ? completePreparation(live, JSON.parse(options.body)) : archiveError();
     });
   await flush();
   assert.match(app.innerHTML, /Real SPHEREx observation|Loading real image/);
   click('retry');
   await flush(); await flush();
   assert.equal(calls, 2);
-  assert.match(app.innerHTML, /Showing previously loaded real observations/);
+  assert.match(app.innerHTML, /Latest search did not load · still showing Band 4/);
   assert.doesNotMatch(app.innerHTML, /Saved real SPHEREx observations/);
   assert.match(app.innerHTML, /\/outputs\/0351a355746245378a187c58d3f0fb88\/frame_000\.png/);
 });
