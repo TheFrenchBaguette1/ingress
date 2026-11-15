@@ -4,7 +4,7 @@ from time import monotonic, sleep
 from astropy import units as u
 from astropy.io import fits
 from astropy.time import Time
-from astropy.utils.data import conf
+from astropy.utils.data import download_file
 from astropy.wcs import WCS
 from astroquery.ipac.irsa import IrsaClass
 from requests import Session
@@ -90,35 +90,39 @@ def load_cutout(
         f"&size={size_deg}"
     )
 
-    with conf.set_temp("remote_timeout", timeout_seconds):
-        with fits.open(cutout_url, cache=cache) as hdul:
-            image = hdul["IMAGE"].data.copy()
-            header = hdul["IMAGE"].header
-            spatial_wcs = WCS(header)
+    # Each concurrent cutout needs its own network timeout. Changing Astropy's
+    # global remote_timeout in a context manager races with other workers.
+    local_file = download_file(
+        cutout_url, cache=cache, show_progress=False, timeout=timeout_seconds
+    )
+    with fits.open(local_file) as hdul:
+        image = hdul["IMAGE"].data.copy()
+        header = hdul["IMAGE"].header
+        spatial_wcs = WCS(header)
 
-            x, y = spatial_wcs.world_to_pixel(coord)
+        x, y = spatial_wcs.world_to_pixel(coord)
 
-            # Disable spatial SIP distortion only for the spectral mapping.
-            spectral_wcs = WCS(header, fobj=hdul, key="W")
-            spectral_wcs.sip = None
+        # Disable spatial SIP distortion only for the spectral mapping.
+        spectral_wcs = WCS(header, fobj=hdul, key="W")
+        spectral_wcs.sip = None
 
-            wavelength, bandwidth = spectral_wcs.pixel_to_world(x, y)
+        wavelength, bandwidth = spectral_wcs.pixel_to_world(x, y)
 
-            return {
-                "image": image,
-                "wcs": spatial_wcs,
-                "target_x": float(x),
-                "target_y": float(y),
-                "wavelength_um": float(wavelength.to_value(u.um)),
-                "bandwidth_um": float(bandwidth.to_value(u.um)),
-                "brightness_unit": header.get("BUNIT", "MJy/sr"),
-                "time_mjd": float(observation["t_min"]),
-                "date_utc": Time(
-                    float(observation["t_min"]),
-                    format="mjd",
-                    scale="utc",
-                ).iso,
-                "detector": str(observation["energy_bandpassname"]),
-                "source_url": image_url,
-                "cutout_url": cutout_url,
-            }
+        return {
+            "image": image,
+            "wcs": spatial_wcs,
+            "target_x": float(x),
+            "target_y": float(y),
+            "wavelength_um": float(wavelength.to_value(u.um)),
+            "bandwidth_um": float(bandwidth.to_value(u.um)),
+            "brightness_unit": header.get("BUNIT", "MJy/sr"),
+            "time_mjd": float(observation["t_min"]),
+            "date_utc": Time(
+                float(observation["t_min"]),
+                format="mjd",
+                scale="utc",
+            ).iso,
+            "detector": str(observation["energy_bandpassname"]),
+            "source_url": image_url,
+            "cutout_url": cutout_url,
+        }

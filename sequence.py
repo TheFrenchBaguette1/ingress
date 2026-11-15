@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from math import ceil, sqrt
 from time import monotonic
@@ -198,102 +199,128 @@ def build_sequence(request):
     )
     attempted_count = 0
 
-    for candidate_index in plan:
-        if len(frames) >= config.MAX_USABLE_FRAMES or monotonic() >= deadline:
-            break
-        observation = unique_candidates[candidate_index]
-        attempted_count += 1
-        source_url = str(observation["access_url"])
-
-        print(
-            f"[{attempted_count}/{len(plan)}] Loading cutout...",
-            flush=True,
-        )
-
-        try:
-            cutout = load_cutout(
-                observation,
-                coord,
-                request.fov_arcmin,
-                cache=config.CACHE_DOWNLOADS,
-                timeout_seconds=min(config.TIMEOUT_SECONDS, max(1, deadline - monotonic())),
+    # Download a bounded batch at a time. Process each batch in sample order so
+    # metadata, failures and the reference brightness unit stay deterministic.
+    # Joining each batch also ensures no worker survives the request/API lock.
+    with ThreadPoolExecutor(max_workers=config.MAX_CUTOUT_WORKERS) as workers:
+        plan_cursor = 0
+        while (
+            plan_cursor < len(plan)
+            and len(frames) < config.MAX_USABLE_FRAMES
+            and monotonic() < deadline
+        ):
+            batch_size = min(
+                config.MAX_CUTOUT_WORKERS,
+                config.MAX_USABLE_FRAMES - len(frames),
+                len(plan) - plan_cursor,
             )
-
-            unit = str(cutout["brightness_unit"]).strip()
-
-            if brightness_unit is not None and unit != brightness_unit:
-                raise ValueError(
-                    f"Different brightness units: {unit} "
-                    f"versus {brightness_unit}."
+            batch = []
+            for candidate_index in plan[plan_cursor:plan_cursor + batch_size]:
+                if monotonic() >= deadline:
+                    break
+                observation = unique_candidates[candidate_index]
+                source_url = str(observation["access_url"])
+                timeout = min(
+                    config.TIMEOUT_SECONDS, max(1, deadline - monotonic())
                 )
+                attempted_count += 1
+                print(
+                    f"[{attempted_count}/{len(plan)}] Loading cutout...",
+                    flush=True,
+                )
+                future = workers.submit(
+                    load_cutout,
+                    observation,
+                    coord,
+                    request.fov_arcmin,
+                    cache=config.CACHE_DOWNLOADS,
+                    timeout_seconds=timeout,
+                )
+                batch.append((source_url, future))
 
-            aligned, footprint = reproject_interp(
-                (cutout["image"], cutout["wcs"]),
-                output_wcs,
-                shape_out=shape,
-                order="bilinear",
-            )
+            plan_cursor += len(batch)
+            if not batch:
+                break
 
-            valid = (footprint > 0) & np.isfinite(aligned)
+            for source_url, future in batch:
+                try:
+                    cutout = future.result()
 
-            if not np.any(valid):
-                raise ValueError("No usable coverage within the output field.")
+                    unit = str(cutout["brightness_unit"]).strip()
 
-            aligned[~valid] = np.nan
+                    if brightness_unit is not None and unit != brightness_unit:
+                        raise ValueError(
+                            f"Different brightness units: {unit} "
+                            f"versus {brightness_unit}."
+                        )
 
-            # A partial image may not contain the requested center.
-            height, width = cutout["image"].shape
-            x = cutout["target_x"]
-            y = cutout["target_y"]
+                    aligned, footprint = reproject_interp(
+                        (cutout["image"], cutout["wcs"]),
+                        output_wcs,
+                        shape_out=shape,
+                        order="bilinear",
+                    )
 
-            center_inside = (
-                -0.5 <= x < width - 0.5
-                and -0.5 <= y < height - 0.5
-            )
+                    valid = (footprint > 0) & np.isfinite(aligned)
 
-            wavelength = None
-            bandwidth = None
+                    if not np.any(valid):
+                        raise ValueError("No usable coverage within the output field.")
 
-            if center_inside:
-                wavelength = finite_number(cutout["wavelength_um"])
-                bandwidth = finite_number(cutout["bandwidth_um"])
+                    aligned[~valid] = np.nan
 
-                if wavelength is not None and wavelength <= 0:
+                    # A partial image may not contain the requested center.
+                    height, width = cutout["image"].shape
+                    x = cutout["target_x"]
+                    y = cutout["target_y"]
+
+                    center_inside = (
+                        -0.5 <= x < width - 0.5
+                        and -0.5 <= y < height - 0.5
+                    )
+
                     wavelength = None
-
-                if bandwidth is not None and bandwidth <= 0:
                     bandwidth = None
 
-            brightness_unit = unit
+                    if center_inside:
+                        wavelength = finite_number(cutout["wavelength_um"])
+                        bandwidth = finite_number(cutout["bandwidth_um"])
 
-            frames.append({
-                "image": aligned,
-                "date_utc": cutout["date_utc"],
-                "time_mjd": cutout["time_mjd"],
-                "band": request.band,
-                "detector": detector,
-                "center_wavelength_um": wavelength,
-                "center_bandwidth_um": bandwidth,
-                "coverage_fraction": float(valid.mean()),
-                "source_url": source_url,
-                "cutout_url": cutout["cutout_url"],
-            })
+                        if wavelength is not None and wavelength <= 0:
+                            wavelength = None
 
-            print(
-                f"  Retained: {cutout['date_utc']} UTC | "
-                f"coverage {valid.mean():.1%}",
-                flush=True,
-            )
+                        if bandwidth is not None and bandwidth <= 0:
+                            bandwidth = None
 
-        except Exception as error:
-            message = f"{type(error).__name__}: {error}"
+                    brightness_unit = unit
 
-            failures.append({
-                "source_url": source_url,
-                "error": message,
-            })
+                    frames.append({
+                        "image": aligned,
+                        "date_utc": cutout["date_utc"],
+                        "time_mjd": cutout["time_mjd"],
+                        "band": request.band,
+                        "detector": detector,
+                        "center_wavelength_um": wavelength,
+                        "center_bandwidth_um": bandwidth,
+                        "coverage_fraction": float(valid.mean()),
+                        "source_url": source_url,
+                        "cutout_url": cutout["cutout_url"],
+                    })
 
-            print(f"  FAILED: {message}", flush=True)
+                    print(
+                        f"  Retained: {cutout['date_utc']} UTC | "
+                        f"coverage {valid.mean():.1%}",
+                        flush=True,
+                    )
+
+                except Exception as error:
+                    message = f"{type(error).__name__}: {error}"
+
+                    failures.append({
+                        "source_url": source_url,
+                        "error": message,
+                    })
+
+                    print(f"  FAILED: {message}", flush=True)
 
     frames.sort(key=lambda frame: frame["time_mjd"])
 

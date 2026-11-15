@@ -163,7 +163,11 @@ class ArchiveTimeTests(unittest.TestCase):
             end_date="2026-11-15", fov_arcmin=5, band="D4",
         )
         sequence_cache.clear()
-        with patch("api.build_sequence", return_value={"status": "ready"}) as build:
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("api.config.OUTPUT_ROOT", Path(temporary)),
+            patch("api.build_sequence", return_value={"status": "ready"}) as build,
+        ):
             first = create_sequence(request)
             second = create_sequence(request)
         self.assertIs(first, second)
