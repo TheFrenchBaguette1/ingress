@@ -17,7 +17,7 @@ The browser calls the same-origin Node development proxy. The proxy forwards the
 }
 ```
 
-RA and Dec are ICRS decimal degrees; the frontend converts sexagesimal input. The backend requires both inclusive UTC dates, a positive field width of at most 60 arcminutes, and one of `D1` through `D6`. The UI currently offers widths from 3 to 20 arcminutes. When a date field is blank, the frontend uses May 1, 2025 for the start and the current UTC day for the end. The backend processes one selected detector at a time and rejects overlapping builds with HTTP 409.
+RA and Dec are ICRS decimal degrees; the frontend converts sexagesimal input. The backend requires both inclusive UTC dates, a positive field width of at most 60 arcminutes, and one of `D1` through `D6`. The UI currently offers widths from 3 to 20 arcminutes. When a date field is blank, the frontend uses May 1, 2025 for the start and the current UTC day for the end. The archive query receives that interval, with the end date extended to midnight on the following day. The backend processes one selected detector at a time and rejects overlapping builds with HTTP 409.
 
 ## Response
 
@@ -29,6 +29,6 @@ For a frame, `<img src="/outputs/<sequence_id>/frame_000.png">` must load from t
 
 ## Demo and errors
 
-`source=demo` explicitly loads `public/demo/frames.json` and bundled synthetic PNGs. The real endpoint never falls back to those assets. A backend HTTP 409 or 502, a proxy 503/504, malformed metadata, or an image load failure produces an explicit UI error. A successful `empty` manifest with no failed observations means no usable frames in the selected band and date range; the UI offers other bands.
+`source=demo` explicitly loads `public/demo/frames.json` and bundled synthetic PNGs. The real endpoint never falls back to those assets. A backend HTTP 409 displays a waiting state and retries the same search every five seconds, with cancellation and a ten-minute limit. A backend HTTP 502, a proxy 503/504, malformed metadata, or an image load failure produces an explicit UI error. A successful `empty` manifest with no failed observations means no usable frames in the selected band and date range; the UI offers other bands.
 
 The backend is still a prototype: it may spend substantial time downloading exposures, has no frame cap or generated-output cleanup, and does not apply instrument quality flags, background matching, or PSF matching. A submitted project should state those limits clearly.

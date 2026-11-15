@@ -6,11 +6,14 @@ from astropy.wcs import WCS
 from astroquery.ipac.irsa import Irsa
 
 
-def search_observations(coord, search_radius_arcsec, collections):
-    """Find observations overlapping the requested coordinates."""
+def search_observations(
+    coord, search_radius_arcsec, collections, start_time, end_time
+):
+    """Find observations overlapping the region and requested UTC interval."""
     return Irsa.query_sia(
         pos=(coord, search_radius_arcsec * u.arcsec),
         collection=collections,
+        time=(start_time, end_time),
     )
 
 

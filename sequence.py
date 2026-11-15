@@ -91,14 +91,16 @@ def build_sequence(request):
         frame="icrs",
     )
 
-    start_mjd = Time(
+    start_time = Time(
         request.start_date.isoformat(),
         scale="utc",
-    ).mjd
+    )
+    start_mjd = start_time.mjd
 
     # Include the entire selected end day.
     end_exclusive = request.end_date + timedelta(days=1)
-    end_mjd = Time(end_exclusive.isoformat(), scale="utc").mjd
+    end_time = Time(end_exclusive.isoformat(), scale="utc")
+    end_mjd = end_time.mjd
 
     detector = f"SPHEREx-{request.band}"
 
@@ -111,6 +113,8 @@ def build_sequence(request):
         coord,
         search_radius_arcsec,
         config.COLLECTIONS,
+        start_time,
+        end_time,
     )
 
     times = np.asarray(results["t_min"], dtype=float)

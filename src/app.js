@@ -1,4 +1,4 @@
-import { WISE_0855, parseCoordinates, fetchRealPatch, loadDemoPatch } from './data.js';
+import { WISE_0855, parseCoordinates, fetchRealPatch, loadDemoPatch, retryWhileBusy } from './data.js';
 import { homeStory, heroArt, heroOrnaments } from './story.js';
 
 const app = document.querySelector('#app');
@@ -171,10 +171,10 @@ function home() {
 }
 function statusCard(kind) {
   const request = state.request || { ra: state.ra, dec: state.dec };
-  if (kind === 'loading') return `<main class="state-main"><div class="state-card" role="status" aria-live="polite"><span class="eyebrow">Searching the sky</span><h1>Gathering this patch</h1>
+  if (kind === 'loading') return `<main class="state-main"><div class="state-card" role="status" aria-live="polite"><span class="eyebrow">Searching the sky</span><h1>${state.request?.waiting ? 'Waiting for the current search' : 'Gathering this patch'}</h1>
     <p>RA ${esc(request.ra)} · Dec ${esc(request.dec)} ${state.source === 'synthetic' ? '· Synthetic example' : '· Real observations'}</p>
     <ol class="loading-steps"><li>Checking coordinates</li><li>Finding available observations</li><li>Preparing aligned images</li></ol><div class="progress-bar" aria-hidden="true"><span></span></div>
-    <p class="small">Large areas and many exposures may take longer.</p><button type="button" class="pill-button" data-action="cancel">Cancel</button></div></main>`;
+    <p class="small">${state.request?.waiting ? 'The server prepares one sequence at a time. This search will start automatically when it is free.' : 'Large areas and many exposures may take longer.'}</p><button type="button" class="pill-button" data-action="cancel">Cancel</button></div></main>`;
   if (kind === 'empty') {
     const demoOnly = state.error?.code === 'demo_target_unavailable';
     const real = state.patch?.source === 'real';
@@ -327,8 +327,14 @@ async function loadPatch() {
     const cacheKey = realCacheKey(coords, band);
     const patch = state.source === 'synthetic'
       ? await loadDemoPatch({ ra: state.ra, dec: state.dec, signal: controller.signal })
-      : realCache.get(cacheKey) || await fetchRealPatch({ ra: state.ra, dec: state.dec, fov: state.fov,
-        from: state.from, to: state.to, band, signal: controller.signal });
+      : realCache.get(cacheKey) || await retryWhileBusy(
+        () => fetchRealPatch({ ra: state.ra, dec: state.dec, fov: state.fov,
+          from: state.from, to: state.to, band, signal: controller.signal }),
+        { signal: controller.signal, onBusy: () => {
+          if (sequence !== loadSequence || state.request?.waiting) return;
+          state.request.waiting = true;
+          render();
+        } });
     if (sequence !== loadSequence) return;
     if (state.source === 'real') realCache.set(cacheKey, patch);
     state.patch = patch;

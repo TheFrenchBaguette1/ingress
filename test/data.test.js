@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { parseCoordinates, loadDemoPatch, fetchRealPatch, normalizeSequencePatch, PatchDataError, WISE_0855 } from '../src/data.js';
+import { parseCoordinates, loadDemoPatch, fetchRealPatch, normalizeSequencePatch, PatchDataError, WISE_0855, retryWhileBusy } from '../src/data.js';
 
 test('sexagesimal and decimal coordinates agree, with bad values rejected', () => {
   const sexagesimal = parseCoordinates(WISE_0855.ra, WISE_0855.dec);
@@ -95,5 +95,34 @@ test('archive empty, failed, and busy states remain distinct', async () => {
     error => error instanceof PatchDataError && error.code === 'invalid_response');
   const fetchImpl = async () => new Response(JSON.stringify({ detail: 'A sequence is already being built.' }), { status: 409 });
   await assert.rejects(fetchRealPatch({ ra: WISE_0855.ra, dec: WISE_0855.dec, fetchImpl }),
-    error => error.code === 'unavailable' && error.message.includes('already being built'));
+    error => error.code === 'busy' && error.message.includes('already being built'));
+});
+
+test('a busy build is retried with the same request, and cancellation stops retries', async () => {
+  let calls = 0;
+  let waits = 0;
+  let busy = 0;
+  const fetchImpl = async (url, options) => {
+    calls++;
+    assert.equal(url, '/api/sequence');
+    assert.equal(JSON.parse(options.body).dec_deg, -85);
+    return calls <= 2
+      ? new Response(JSON.stringify({ detail: 'A sequence is already being built.' }), { status: 409 })
+      : new Response(JSON.stringify(sequenceManifest('ready', { ra_deg: 120, dec_deg: -85 })), { status: 200 });
+  };
+  const patch = await retryWhileBusy(() => fetchRealPatch({ ra: '120', dec: '-85', fov: 5,
+    band: 4, fetchImpl }), { wait: async () => { waits++; }, onBusy: () => { busy++; } });
+  assert.equal(patch.source, 'real');
+  assert.equal(calls, 3);
+  assert.equal(waits, 2);
+  assert.equal(busy, 2);
+
+  const controller = new AbortController();
+  let cancelledCalls = 0;
+  await assert.rejects(retryWhileBusy(async () => {
+    cancelledCalls++;
+    throw new PatchDataError('busy', 'Already building');
+  }, { signal: controller.signal, onBusy: () => controller.abort() }),
+  error => error.name === 'AbortError');
+  assert.equal(cancelledCalls, 1);
 });

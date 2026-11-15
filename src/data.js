@@ -30,6 +30,40 @@ export class PatchDataError extends Error {
   }
 }
 
+function waitForAvailableBuild(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('The request was cancelled.', 'AbortError'));
+      return;
+    }
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, ms);
+    function abort() {
+      clearTimeout(timer);
+      reject(new DOMException('The request was cancelled.', 'AbortError'));
+    }
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
+// The Python service can prepare only one sequence at once. A browser abort does
+// not necessarily stop a build already running there, so wait and retry a 409.
+export async function retryWhileBusy(operation, { signal, onBusy = () => {}, wait = waitForAvailableBuild,
+  delayMs = 5000, maxRetries = 120 } = {}) {
+  for (let retries = 0; ; retries++) {
+    if (signal?.aborted) throw new DOMException('The request was cancelled.', 'AbortError');
+    try {
+      return await operation();
+    } catch (error) {
+      if (error?.code !== 'busy') throw error;
+      if (retries >= maxRetries) {
+        throw new PatchDataError('busy_timeout', 'Another archive search is still running. Try again in a few minutes.', error);
+      }
+      onBusy(retries + 1);
+      await wait(delayMs, signal);
+    }
+  }
+}
+
 export function parseRA(input) {
   const value = String(input ?? '').trim().toLowerCase();
   if (!value) return { error: 'Enter an RA, like 08h55m10.831s.' };
@@ -267,7 +301,8 @@ export async function fetchRealPatch({ ra, dec, fov = 10, from = '', to = '', ba
       if (typeof failure?.message === 'string') message = failure.message;
       else if (typeof failure?.detail === 'string') message = failure.detail;
     } catch { /* A proxy can return an HTML error page. */ }
-    throw new PatchDataError('unavailable', message || `The SPHEREx data service returned HTTP ${response.status}.`);
+    throw new PatchDataError(response.status === 409 ? 'busy' : 'unavailable',
+      message || `The SPHEREx data service returned HTTP ${response.status}.`);
   }
   let payload;
   try {
