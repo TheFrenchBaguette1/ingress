@@ -1,4 +1,4 @@
-name: Publish saved SPHEREx preview
+name: Publish Ingress redirect
 
 on:
   push:
@@ -30,11 +30,34 @@ jobs:
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
 
-      - name: Prepare the saved observations site
+      - name: Prepare the viewer redirect
         run: |
           mkdir -p _site
-          cp -R src public _site/
-          awk '/<\/head>/ { print "    <meta name=\"ingress-static-preview\" content=\"true\" />" } { print }' index.html > _site/index.html
+          cat > _site/index.html <<'HTML'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Open Ingress</title>
+            <link rel="canonical" href="https://ingress-ro5t.onrender.com/">
+          </head>
+          <body>
+            <a id="viewer" href="https://ingress-ro5t.onrender.com/">Open Ingress</a>
+            <script>
+              const link = document.getElementById('viewer');
+              const viewer = new URL(link.href);
+              const shared = new URLSearchParams(window.location.search);
+              for (const key of ['ra', 'dec', 'band', 'date', 'fov', 'from', 'to']) {
+                const value = shared.get(key);
+                if (value) viewer.searchParams.set(key, value);
+              }
+              link.href = viewer.href;
+              window.location.replace(viewer.href);
+            </script>
+          </body>
+          </html>
+          HTML
           touch _site/.nojekyll
 
       - name: Upload the static site

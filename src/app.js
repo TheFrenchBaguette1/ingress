@@ -447,11 +447,14 @@ function statusCard(kind) {
     const available = [...(state.prepared?.patches || new Map())].sort(([a], [b]) => a - b);
     const status = flipbookEntry(state.prepared, state.band)?.status;
     const name = esc(bandName(state.band));
-    return `<main class="state-main"><div class="state-card" role="alert"><span class="state-icon">⚠</span><h1>${status === 'empty' ? `No loaded frames for ${name}` : `${name} is unavailable`}</h1>
+    const sharedFailure = state.band === 'all' && sharedCatalogFailure(state.prepared);
+    const heading = sharedFailure ? 'Archive search unavailable'
+      : status === 'empty' ? `No loaded frames for ${name}` : `${name} is unavailable`;
+    return `<main class="state-main"><div class="state-card" role="alert"><span class="state-icon">⚠</span><h1>${heading}</h1>
       <p>${esc(state.error?.message || 'No verified images were prepared for this detector.')}</p>
-      ${state.prepared?.live ? `<div class="actions">${['all', 1, 2, 3, 4, 5, 6].filter(band => band !== state.band).map(band => `<button type="button" class="pill-button" data-action="band" data-band="${band}">Try ${esc(bandName(band))}</button>`).join('')}</div>`
+      ${sharedFailure ? '' : state.prepared?.live ? `<div class="actions">${['all', 1, 2, 3, 4, 5, 6].filter(band => band !== state.band).map(band => `<button type="button" class="pill-button" data-action="band" data-band="${band}">Try ${esc(bandName(band))}</button>`).join('')}</div>`
       : available.length ? `<p>These other detector bands have verified real frames ready:</p><div class="actions">${available.map(([band, patch]) => `<button type="button" class="pill-button" data-action="view-prepared-band" data-band="${band}">View Band ${band} · ${patch.frames.length} frame${patch.frames.length === 1 ? '' : 's'}</button>`).join('')}</div>` : '<p>No verified detector frames are ready for this patch yet.</p>'}
-      <div class="actions"><button type="button" class="primary-button" data-action="retry-preparation">${state.prepared?.live ? 'Retry requested band' : 'Recheck missing bands'}</button><button type="button" class="pill-button" data-action="home">Change coordinates</button>${state.prepared?.live ? '<button class="pill-button" data-action="saved-real">View saved SPHEREx observations</button>' : ''}</div></div></main>`;
+      <div class="actions"><button type="button" class="primary-button" data-action="retry-preparation">${sharedFailure ? 'Retry archive search' : state.prepared?.live ? 'Retry requested band' : 'Recheck missing bands'}</button><button type="button" class="pill-button" data-action="home">Change coordinates</button>${state.prepared?.live ? '<button class="pill-button" data-action="saved-real">View saved SPHEREx observations</button>' : ''}</div></div></main>`;
   }
   if (kind === 'empty') {
     const readyBands = [...(state.prepared?.patches || new Map())]
@@ -652,13 +655,24 @@ function flipbookEntry(group, number) {
   const active = group.jobStatus === 'running' || entries.some(entry => ACTIVE_BAND_STATUSES.has(entry.status));
   const hasFrames = entries.some(entry => entry.manifest?.frames?.length);
   const incomplete = entries.some(entry => entry.status === 'unavailable' || entry.status === 'partial');
+  const firstBandError = !hasFrames && entries.find(entry =>
+    entry.status === 'unavailable' && typeof entry.error === 'string' && entry.error.trim())?.error;
   return {
     status: active ? 'running' : group.allError ? 'unavailable' : incomplete ? hasFrames ? 'partial' : 'unavailable'
       : hasFrames ? 'ready' : 'empty',
     candidate_count: reported.length ? sum('candidate_count') : null,
     attempted_count: sum('attempted_count'),
-    error: group.allError,
+    error: group.allError || firstBandError,
   };
+}
+
+function sharedCatalogFailure(group) {
+  if (!group?.live || !group.allRequested) return false;
+  const entries = Object.values(group.bands);
+  return entries.length === 6 && entries.every(entry =>
+    entry.status === 'unavailable' && !entry.manifest && !entry.candidate_count &&
+    typeof entry.error === 'string' && /IRSA|archive|image search|catalog/i.test(entry.error)) &&
+    group.records.size === 0 && group.failedPreviews.size === 0;
 }
 
 function unreadyFlipbookPreviews(group, number, type = 'pending') {
@@ -666,6 +680,21 @@ function unreadyFlipbookPreviews(group, number, type = 'pending') {
   return records.flatMap(record => record?.patch.frames || []).filter(frame =>
     !group.previews.has(frame.imageUrl) && (type === 'failed'
       ? group.failedPreviews.has(frame.imageUrl) : !group.failedPreviews.has(frame.imageUrl)));
+}
+
+function retryFailedFlipbookPreviews(group, number) {
+  const failed = unreadyFlipbookPreviews(group, number, 'failed');
+  for (const frame of failed) {
+    group.failedPreviews.delete(frame.imageUrl);
+    group.previewErrors.delete(frame.imageUrl);
+  }
+  if (failed.length) pumpFlipbookPreviews(group);
+  return failed.length;
+}
+
+function firstPreviewError(group, number) {
+  const failed = unreadyFlipbookPreviews(group, number, 'failed');
+  return failed.map(frame => group.previewErrors.get(frame.imageUrl)).find(Boolean) || '';
 }
 
 function flipbookNotice() {
@@ -681,7 +710,8 @@ function flipbookNotice() {
     }
     const failures = unreadyFlipbookPreviews(group, number, 'failed').length;
     if (failures) {
-      return `<p class="notice" role="status" data-flipbook-progress>${esc(failures)} image previews could not load in this browser.</p>`;
+      const reason = firstPreviewError(group, number);
+      return `<p class="notice" role="status" data-flipbook-progress>${esc(failures)} image previews could not load in this browser.${reason ? ` First error: ${esc(reason)}` : ''}</p>`;
     }
     return '';
   }
@@ -968,11 +998,15 @@ function pumpFlipbookPreviews(group) {
       preloadPreparedImage(url, group.controller.signal).then(preview => {
         if (activeFlipbook === group) group.previews.set(url, preview);
       }).catch(error => {
-        if (activeFlipbook === group && error?.name !== 'AbortError') group.failedPreviews.add(url);
+        if (activeFlipbook === group && error?.name !== 'AbortError') {
+          group.failedPreviews.add(url);
+          group.previewErrors.set(url, String(error?.message || 'Image request failed.'));
+        }
         // The per-image deadline can also abort a preview. It must be allowed
         // to finish as a failed preview while the wider search is still active.
         if (activeFlipbook === group && !group.controller.signal.aborted && error?.name === 'AbortError') {
           group.failedPreviews.add(url);
+          group.previewErrors.set(url, 'Image preview timed out after 20 seconds.');
         }
       }).finally(() => {
         group.pendingPreviews.delete(url);
@@ -1088,7 +1122,7 @@ function presentFlipbook(group) {
         ['ready', 'partial', 'empty', 'unavailable'].includes(entry?.status)) {
       const reason = entry.error || (entry.status === 'empty'
         ? `No usable images were found for ${bandName(number)} at these coordinates and dates.`
-        : `Image previews could not load for ${bandName(number)}.`);
+        : `Image previews could not load for ${bandName(number)}.${firstPreviewError(group, number) ? ` First error: ${firstPreviewError(group, number)}` : ''}`);
       group.wantedBand = null;
       if (group.opened) group.bandError = reason;
       else if (entry.status !== 'empty' && lastRealView && sameSkyPosition(state, lastRealView)) {
@@ -1212,7 +1246,7 @@ async function loadLiveFlipbook(coords, { restoreSequenceId, forceRefresh }) {
     revision: -1,
     bands: Object.fromEntries([1, 2, 3, 4, 5, 6].map(number => [`D${number}`, { status: 'idle' }])),
     patches: new Map(), records: new Map(), previews: new Map(),
-    pendingPreviews: new Set(), failedPreviews: new Set(), scheduling: new Set(),
+    pendingPreviews: new Set(), failedPreviews: new Set(), previewErrors: new Map(), scheduling: new Set(),
   };
   const band = state.band;
   activeFlipbook = group;
@@ -1270,6 +1304,19 @@ async function chooseLiveBand(group, number) {
   group.wantedBand = number;
   if (group.patches.has(number) && (number !== 'all' || group.allRequested)) {
     presentFlipbook(group);
+    return;
+  }
+  // A failed browser PNG fetch does not invalidate the backend's real frames.
+  // Retry those exact image URLs before asking the archive to build again.
+  const retryExisting = number !== 'all' || group.allRequested;
+  const retried = retryExisting ? retryFailedFlipbookPreviews(group, number) : 0;
+  if (retryExisting && (retried || unreadyFlipbookPreviews(group, number).length)) {
+    if (!group.opened) {
+      state.band = number;
+      state.view = 'loading';
+      state.request = { controller: group.controller, ...group.query, flipbook: group };
+    }
+    scheduleFlipbookPaint(group);
     return;
   }
   const status = flipbookEntry(group, number)?.status;
@@ -1593,7 +1640,11 @@ app.addEventListener('click', event => {
     ? { restoreSequenceId: state.linkedSequenceId } : { forceRefresh: true });
   else if (action === 'refresh-observations') loadPatch({ forceRefresh: true });
   else if (action === 'expand-flipbook') loadPatch();
-  else if (action === 'retry-preparation') loadPatch({ forceRefresh: true });
+  else if (action === 'retry-preparation') {
+    if (activeFlipbook && unreadyFlipbookPreviews(activeFlipbook, state.band, 'failed').length) {
+      void chooseLiveBand(activeFlipbook, state.band);
+    } else loadPatch({ forceRefresh: true });
+  }
   else if (action === 'view-prepared-band') viewPreparedBand(Number(target.dataset.band));
   else if (action === 'retry-same-parent') retrySameParentPixels();
   else if (action === 'search-date-range') loadPatch({ forceRefresh: true });

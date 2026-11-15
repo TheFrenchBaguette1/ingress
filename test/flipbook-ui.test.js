@@ -107,6 +107,83 @@ test('All wavelengths opens progressively, adds earlier frames without changing 
   click('home');
 });
 
+test('preview retries and band switches reuse the prepared observations', async () => {
+  const oldImage = globalThis.Image;
+  const oldCreate = URL.createObjectURL;
+  const oldRevoke = URL.revokeObjectURL;
+  let attempts = 0;
+  const calls = [];
+  globalThis.Image = class {
+    decode() {
+      attempts++;
+      return attempts <= 2 ? Promise.reject(new Error(`transient decode error ${attempts}`)) : Promise.resolve();
+    }
+  };
+  URL.createObjectURL = () => `blob:test-${attempts}`;
+  URL.revokeObjectURL = () => {};
+  let view;
+  try {
+    view = await mount(base, (path) => {
+      calls.push(path);
+      if (path === '/api/flipbook') return Promise.resolve(payload('complete', 1, {
+        D1: { status: 'ready', candidate_count: 1, attempted_count: 1,
+          manifest: manifest('D1', sequence1, ['2025-06-03 06:30:00.000']) },
+        D2: { status: 'empty' }, D3: { status: 'empty' },
+        D4: { status: 'empty' }, D5: { status: 'empty' }, D6: { status: 'empty' },
+      }));
+      assert.match(path, new RegExp(`^/outputs/${sequence1}/frame_000\\.png$`));
+      return Promise.resolve(new Response(new Blob(['test'], { type: 'image/png' })));
+    });
+    await eventually(() => /All wavelengths is unavailable/.test(view.app.innerHTML));
+    assert.match(view.app.innerHTML, /transient decode error 1/);
+    view.click('retry-preparation');
+    await eventually(() => /transient decode error 2/.test(view.app.innerHTML));
+    view.click('band', { band: '1' });
+    await eventually(() => /Frame 1 of 1/.test(view.app.innerHTML));
+    assert.equal(attempts, 3);
+    assert.equal(calls.filter(path => path === '/api/flipbook').length, 1);
+    assert.equal(calls.filter(path => path.startsWith('/outputs/')).length, 3);
+  } finally {
+    view?.click('home');
+    if (oldImage === undefined) delete globalThis.Image;
+    else globalThis.Image = oldImage;
+    URL.createObjectURL = oldCreate;
+    URL.revokeObjectURL = oldRevoke;
+  }
+});
+
+test('a shared archive timeout shows its real error and avoids six blind band retries', async () => {
+  const archiveError = "IRSA's SPHEREx image search did not respond in time for this patch.";
+  const unavailable = Object.fromEntries([1, 2, 3, 4, 5, 6].map(number =>
+    [`D${number}`, { status: 'unavailable', error: number === 1 ? archiveError :
+      "IRSA's SPHEREx image search is temporarily unavailable." }]));
+  const { app, click } = await mount(base, (path) => {
+    assert.equal(path, '/api/flipbook');
+    return Promise.resolve(payload('complete', 1, unavailable));
+  });
+  await eventually(() => /Archive search unavailable/.test(app.innerHTML));
+  assert.match(app.innerHTML, /IRSA&#39;s SPHEREx image search did not respond in time/);
+  assert.match(app.innerHTML, /Retry archive search/);
+  assert.doesNotMatch(app.innerHTML, /Image previews could not load/);
+  assert.doesNotMatch(app.innerHTML, /Try Band [1-6]/);
+  click('home');
+});
+
+test('mixed detector failures still offer a different band', async () => {
+  const { app, click } = await mount(base, (path) => {
+    assert.equal(path, '/api/flipbook');
+    return Promise.resolve(payload('complete', 1, {
+      D1: { status: 'unavailable', error: 'Band 1 archive timed out.' },
+      D2: { status: 'empty' }, D3: { status: 'empty' },
+      D4: { status: 'empty' }, D5: { status: 'empty' }, D6: { status: 'empty' },
+    }));
+  });
+  await eventually(() => /All wavelengths is unavailable/.test(app.innerHTML));
+  assert.match(app.innerHTML, /Band 1 archive timed out/);
+  assert.match(app.innerHTML, /Try Band 2/);
+  click('home');
+});
+
 test('Old linked exposure sets stay intact until explicitly expanded', async () => {
   const date = '2025-06-04 06:30:00.000';
   const calls = [];

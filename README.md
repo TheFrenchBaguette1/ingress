@@ -4,38 +4,26 @@ Team Ingress's project for the [2026 NASA Space Apps “Planet X and SPHEREx” 
 
 ## Try the live website
 
-**[Open the live Ingress viewer](https://ideal-train-jjgp96g4g46rfqgwv-5173.app.github.dev/)** · **[Play the saved SPHEREx observations on GitHub Pages](https://thefrenchbaguette1.github.io/ingress/)**
+**[Open Ingress](https://ingress-ro5t.onrender.com/)**
 
-The website's Codespace port 5173 is public, so teammates can use these links without signing in to Sean's GitHub account. GitHub may show a one-time development-port notice; choose **Continue** to open the site. Port 8000 stays private; the website forwards its real-data requests to the Python backend inside the Codespace.
-
-Use the GitHub Pages link if the Codespace link fails. It plays eight real Band 4 observations at RA 180°, Dec −30° with dates and original FITS links. It works independently of the Codespace. Searching new coordinates requires the live viewer and access to the IRSA archive.
-
-The live viewer is available **only while the Codespace and both servers are running**. If the link is unavailable, use the saved sequence or restart the Codespace and servers using the commands below.
+Anyone can open the viewer and search for real SPHEREx observations. After inactivity, the first visit wakes the free hosting service and can take about a minute.
 
 ## Run the complete app
 
-Use a stable Python 3.11–3.14 and Node 20+. On macOS, double-click `setup-python.command` once to create `.venv` and install the Python dependencies. The same setup from a terminal is:
+Use Python 3.11–3.14. On macOS, double-click `setup-python.command` once to install dependencies, or run these commands from the repository root.
 
 ```sh
 python3.11 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-Then start the backend in one terminal:
+Start the viewer and API together.
 
 ```sh
 .venv/bin/python -m uvicorn api:app --host 127.0.0.1 --port 8000
 ```
 
-In another terminal:
-
-```sh
-INGRESS_API_ORIGIN=http://127.0.0.1:8000 npm run dev
-```
-
-Open <http://localhost:5173>. The Node server serves the frontend, forwards `/api/*` to Python, and serves generated PNG frames through `/outputs/*`. `npm test` runs the frontend integration checks. Run `.venv/bin/python -m unittest discover -s test -p 'test_*.py'` for backend checks.
-
-You can run `npm run dev` without Python to open the bundled real SPHEREx example. Searching for other observations requires the Python backend.
+Open `http://127.0.0.1:8000` in your browser. Run `npm test` with Node 20+ for frontend checks and `.venv/bin/python -m unittest discover -s test -p 'test_*.py'` for backend checks.
 
 ## How real data works
 
