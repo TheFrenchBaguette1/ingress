@@ -129,3 +129,26 @@ test('a partial real sequence can probe the archive again and gives a truthful c
   await flush();
   assert.equal(calls, 2);
 });
+
+test('a failed refresh keeps a live real sequence instead of replacing it with the older sample', async () => {
+  const live = JSON.parse(sample);
+  for (const frame of live.frames) {
+    frame.image_url = frame.image_url.replace('/public/real-example/ra180-dec-30-d4/',
+      `/outputs/${live.sequence_id}/`);
+  }
+  let calls = 0;
+  const { app, click } = await mount('http://localhost:5173/?ra=180&dec=-30&band=4&fov=5&from=2025-05-01&to=2026-11-15',
+    async url => {
+      calls++;
+      assert.equal(url, '/api/sequence');
+      return calls === 1 ? new Response(JSON.stringify(live), { status: 200 }) : archiveError();
+    });
+  await flush();
+  assert.match(app.innerHTML, /Real SPHEREx observation|Loading real image/);
+  click('retry');
+  await flush(); await flush();
+  assert.equal(calls, 2);
+  assert.match(app.innerHTML, /Showing previously loaded real observations/);
+  assert.doesNotMatch(app.innerHTML, /Saved real SPHEREx observations/);
+  assert.match(app.innerHTML, /\/outputs\/0351a355746245378a187c58d3f0fb88\/frame_000\.png/);
+});

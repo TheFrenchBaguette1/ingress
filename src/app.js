@@ -79,6 +79,13 @@ function sameSkyPosition(first, second) {
   return a.isValid && b.isValid && Math.abs(a.raDeg - b.raDeg) < 1e-5 &&
     Math.abs(a.decDeg - b.decDeg) < 1e-5;
 }
+function sameRealQuery(first, second) {
+  return sameSkyPosition(first, second) && first.band === second.band &&
+    first.fov === second.fov &&
+    (first.from || '2025-05-01') === (second.from || '2025-05-01') &&
+    (first.to || new Date().toISOString().slice(0, 10)) ===
+      (second.to || new Date().toISOString().slice(0, 10));
+}
 function matchesBundledExample(query) {
   return sameSkyPosition(query, { ra: '180', dec: '-30' }) &&
     query.band === 4 && query.fov === 5 &&
@@ -438,7 +445,8 @@ async function loadPatch({ forceRefresh = false } = {}) {
     if (sequence !== loadSequence || error?.name === 'AbortError') return;
     const failure = { code: String(error.code || 'unavailable'), message: String(error.message || 'The data service did not answer.') };
     let savedPatch = null;
-    if (state.source === 'real' && failure.code === 'archive_unavailable' && matchesBundledExample(state)) {
+    if (state.source === 'real' && failure.code === 'archive_unavailable' && matchesBundledExample(state) &&
+        !(lastRealView && !lastRealView.patch.bundledRealExample && sameRealQuery(state, lastRealView))) {
       try { savedPatch = await loadBundledRealPatch({ signal: controller.signal }); }
       catch { /* The archive error remains the honest result if the saved sample is unavailable. */ }
     }

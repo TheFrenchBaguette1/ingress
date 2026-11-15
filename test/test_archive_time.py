@@ -6,6 +6,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from requests.exceptions import Timeout
+
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.table import Table
