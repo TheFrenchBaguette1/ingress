@@ -199,7 +199,7 @@ class ArchiveCacheTests(unittest.TestCase):
         )
         clock = [0.0]
 
-        def slow_search(*_args):
+        def slow_search(*_args, **_kwargs):
             clock[0] = 121.0
             return observations
 

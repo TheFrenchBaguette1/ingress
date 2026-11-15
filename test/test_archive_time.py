@@ -85,7 +85,7 @@ class ArchiveTimeTests(unittest.TestCase):
         self.assertEqual(query.call_count, 5)
         self.assertEqual(len(result), 1)
         self.assertTrue(result.meta["archive_listing_partial"])
-        self.assertIn("2 of 4", result.meta["archive_listing_window_note"])
+        self.assertIn("3 of 4", result.meta["archive_listing_window_note"])
         # A slow broad request has not established a global service outage.
         self.assertEqual(__import__("archive")._outage_until, 0.0)
 

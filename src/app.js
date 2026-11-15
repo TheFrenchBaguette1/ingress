@@ -488,7 +488,13 @@ function changeSource(source) {
   if (state.source === source) return;
   if (!state.customFov && state.fov === defaultFov(state.source)) state.fov = defaultFov(source);
   state.source = source;
-  if (state.view === 'home') render();
+  if (state.view === 'home') {
+    // The home form has no band picker. Start its next search in the default
+    // band instead of carrying over a hidden demo/viewer selection.
+    state.band = 4;
+    state.activeDateId = '';
+    render();
+  }
   else loadPatch();
 }
 function setBand(number) {
