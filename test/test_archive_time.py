@@ -60,6 +60,20 @@ class ArchiveTimeTests(unittest.TestCase):
             search_observations(coord, 600, ["spherex_dr1"], start, end)
         self.assertEqual(query.call_count, 2)
 
+    def test_pyvo_wrapped_read_timeout_is_a_transient_outage(self):
+        coord = SkyCoord(120, -85, unit="deg")
+        start = Time("2025-05-01", scale="utc")
+        end = Time("2025-06-01", scale="utc")
+        with (
+            patch("archive._BoundedIrsa.query_sia", side_effect=RuntimeError(
+                "DALFormatError: ReadTimeout: HTTPSConnectionPool: Read timed out."
+            )) as query,
+            patch("archive.sleep"),
+            self.assertRaises(ArchiveUnavailable),
+        ):
+            search_observations(coord, 600, ["spherex_dr1"], start, end)
+        self.assertEqual(query.call_count, 2)
+
     def test_sia_session_sets_bounded_network_timeout(self):
         session = _TimedSession()
         session.deadline = 10_000

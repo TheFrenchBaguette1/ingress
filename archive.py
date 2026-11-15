@@ -42,7 +42,11 @@ def _transient_archive_error(error):
     message = str(error).lower()
     return bool(re.search(r"\b(?:502|503|504)\b", message)) or any(
         phrase in message for phrase in
-        ("proxy error", "bad gateway", "service unavailable", "gateway timeout")
+        (
+            "proxy error", "bad gateway", "service unavailable",
+            "gateway timeout", "read timed out", "readtimeout",
+            "connecttimeout",
+        )
     )
 
 
