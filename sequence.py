@@ -1,5 +1,5 @@
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from math import ceil, sqrt
 from time import monotonic
 from typing import Literal
@@ -9,6 +9,7 @@ import numpy as np
 from matplotlib import colormaps
 from PIL import Image
 from astropy.coordinates import SkyCoord
+from astropy.table import Table
 from astropy.time import Time
 from astropy.visualization import AsinhStretch, ImageNormalize
 from astropy.wcs import WCS
@@ -129,15 +130,26 @@ def build_sequence(request):
     # Search a circle enclosing the requested square field.
     search_radius_arcsec = request.fov_arcmin * 60 / sqrt(2)
 
-    print("Searching the requested sky region...", flush=True)
-
-    results = search_observations(
-        coord,
-        search_radius_arcsec,
-        config.COLLECTIONS,
-        start_time,
-        end_time,
+    # The user may enter dates before launch or in the future. Preserve that
+    # requested interval in the manifest, but avoid searching empty years.
+    available_start = max(request.start_date, config.MISSION_START_DATE)
+    available_end_exclusive = min(
+        end_exclusive, datetime.now(timezone.utc).date() + timedelta(days=1)
     )
+    if available_start >= available_end_exclusive:
+        results = Table(
+            names=["t_min", "energy_bandpassname", "access_url"],
+            dtype=[float, "U20", "U1"],
+        )
+    else:
+        print("Searching the requested sky region...", flush=True)
+        results = search_observations(
+            coord,
+            search_radius_arcsec,
+            config.COLLECTIONS,
+            Time(available_start.isoformat(), scale="utc"),
+            Time(available_end_exclusive.isoformat(), scale="utc"),
+        )
 
     times = np.asarray(results["t_min"], dtype=float)
 

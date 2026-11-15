@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -56,8 +57,23 @@ class ArchiveTimeTests(unittest.TestCase):
         self.assertEqual(manifest["status"], "empty")
         self.assertEqual(manifest["request"]["ra_deg"], 120)
         self.assertEqual(manifest["request"]["dec_deg"], -85)
-        self.assertEqual(search.call_args.args[3].isot, "2022-05-01T00:00:00.000")
-        self.assertEqual(search.call_args.args[4].isot, "2026-12-01T00:00:00.000")
+        self.assertEqual(search.call_args.args[3].isot, "2025-05-01T00:00:00.000")
+        last_day = min(date(2026, 12, 1), datetime.now(timezone.utc).date() + timedelta(days=1))
+        self.assertEqual(search.call_args.args[4].isot, f"{last_day.isoformat()}T00:00:00.000")
+
+    def test_dates_before_launch_skip_the_archive(self):
+        request = SequenceRequest(
+            ra_deg=120, dec_deg=-85, start_date="2022-05-01",
+            end_date="2024-12-31", fov_arcmin=5, band="D4",
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("sequence.config.OUTPUT_ROOT", Path(temporary)),
+            patch("sequence.search_observations") as search,
+        ):
+            manifest = build_sequence(request)
+        search.assert_not_called()
+        self.assertEqual(manifest["status"], "empty")
 
     def test_many_exposures_have_a_bounded_time_spread_sample(self):
         times = [Time("2025-05-01").mjd + index * 3 for index in range(102)]

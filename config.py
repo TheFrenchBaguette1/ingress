@@ -1,8 +1,10 @@
 from pathlib import Path
+from datetime import date
 
 # ---------- Archive settings ----------
 
 COLLECTIONS = ["spherex_dr1", "spherex_qr3"]
+MISSION_START_DATE = date(2025, 5, 1)
 CACHE_DOWNLOADS = True
 TIMEOUT_SECONDS = 25
 MAX_BUILD_SECONDS = 120

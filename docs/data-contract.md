@@ -17,7 +17,7 @@ The browser calls the same-origin Node development proxy. The proxy forwards the
 }
 ```
 
-RA and Dec are ICRS decimal degrees; the frontend converts sexagesimal input. The backend requires both inclusive UTC dates, a positive field width of at most 60 arcminutes, and one of `D1` through `D6`. The UI currently offers widths from 3 to 20 arcminutes. When a date field is blank, the frontend uses May 1, 2025 for the start and the current UTC day for the end. The archive query receives that interval, with the end date extended to midnight on the following day. The backend processes one selected detector at a time and rejects overlapping builds with HTTP 409.
+RA and Dec are ICRS decimal degrees; the frontend converts sexagesimal input. The backend requires both inclusive UTC dates, a positive field width of at most 60 arcminutes, and one of `D1` through `D6`. The UI currently offers widths from 3 to 20 arcminutes. When a date field is blank, the frontend uses May 1, 2025 for the start and the current UTC day for the end. The archive query clips that interval to the mission period through today, with the final available day extended to midnight on the following day. The original requested dates remain in the manifest. The backend processes one selected detector at a time and rejects overlapping builds with HTTP 409.
 
 ## Response
 
