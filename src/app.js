@@ -198,6 +198,7 @@ function imageStage(frame, band, index, frames) {
   const scaleLength = state.fov >= 12 ? 5 : state.fov >= 6 ? 2 : 1;
   const mover = synthetic && Array.isArray(frame.moverPct) ? `<div class="demo-marker" style="left:${Number(frame.moverPct[0])}%;top:${Number(frame.moverPct[1])}%"><span>Simulated moving source</span></div>` : '';
   const variable = synthetic && Array.isArray(frame.variablePct) ? `<div class="demo-marker variable" style="left:${Number(frame.variablePct[0])}%;top:${Number(frame.variablePct[1])}%"><span>Simulated variable source</span></div>` : '';
+  const coverageNote = frame.flags?.find(flag => flag.code === 'partial_coverage');
   return `<div class="stage-top"><div><span class="frame-date">${esc(displayDate(frame.dateId))}</span><span class="frame-ordinal">Frame ${index + 1} of ${frames.length} · ${esc(date?.timeUtc || '')} UTC</span></div>
     <span class="wavelength-chip" style="--band-color:${bandColor(band)}"><i class="color-chip"></i>${frame.wavelengthUm == null ? 'Wavelength unavailable' : esc(Number(frame.wavelengthUm).toFixed(2)) + ' µm at target'} · Band ${band.number}</span></div>
     <div class="image-view ${synthetic ? 'demo' : ''}" aria-label="${synthetic ? 'Synthetic illustration' : 'SPHEREx observation'} at ${esc(displayDate(frame.dateId))}">
@@ -205,7 +206,8 @@ function imageStage(frame, band, index, frames) {
       ${synthetic ? '<div class="image-watermark">SYNTHETIC DEMO — NOT SPHEREx OBSERVATIONS</div>' : ''}
       <div class="compass"><span>N</span><span>↑</span><span>E ←</span></div>
       ${pixelScale ? `<div class="scale-bar" style="--scale-width:${(scaleLength / state.fov * 100).toFixed(1)}%">${scaleLength}′</div>` : ''}<div class="fov-label">${state.fov}′ wide</div>
-    </div><div class="image-caption"><span>Crosshair marks the entered coordinates${pixelScale ? ` · 1 pixel ≈ ${esc(pixelScale)}″ of sky` : ''}</span><a href="#frame-details-desktop" data-action="show-details">Source and details</a></div>`;
+    </div><div class="image-caption"><span>Crosshair marks the entered coordinates${pixelScale ? ` · 1 pixel ≈ ${esc(pixelScale)}″ of sky` : ''}</span><a href="#frame-details-desktop" data-action="show-details">Source and details</a></div>
+    ${coverageNote ? `<p class="coverage-note">${esc(coverageNote.label)} Missing pixels are dark.</p>` : ''}`;
 }
 function timeline(frames, band) {
   const patch = state.patch;

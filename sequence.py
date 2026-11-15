@@ -290,7 +290,11 @@ def build_sequence(request):
             filename = f"frame_{index:03d}.png"
 
             masked = np.ma.masked_invalid(frame["image"])
-            rgba = cmap(norm(masked), bytes=True)
+            rgba = np.asarray(cmap(norm(masked), bytes=True)).copy()
+            # ImageNormalize can drop the masked-array mask. Set alpha from
+            # the aligned image explicitly so uncovered sky is never shown
+            # as a bright pixel in the exported PNG.
+            rgba[~np.isfinite(frame["image"]), 3] = 0
 
             # Image arrays have north at the upper end of the y axis.
             # Flip rows when writing a PNG with a top-left origin.

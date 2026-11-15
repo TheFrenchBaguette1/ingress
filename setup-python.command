@@ -5,6 +5,8 @@ cd -- "$(dirname -- "$0")"
 
 if command -v python3.11 >/dev/null 2>&1; then
   python_executable=$(command -v python3.11)
+elif [[ -x /opt/homebrew/bin/python3.11 ]]; then
+  python_executable=/opt/homebrew/bin/python3.11
 elif command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; sys.exit(not ((3, 11) <= sys.version_info[:2] < (3, 15)))'; then
   python_executable=$(command -v python3)
 else
