@@ -70,6 +70,7 @@ class ProgressiveFlipbookTest(TestCase):
             flipbook, _jobs=OrderedDict(), _jobs_by_key={}, BandWriter=StubWriter,
         ))
         self.saved = self.enterContext(patch.object(flipbook, "_saved_manifest", return_value=None))
+        self.csv_catalog = self.enterContext(patch.object(flipbook, "search_catalog", return_value=None))
 
     def test_ready_frames_publish_before_slowest_parent_and_grow_past_eight(self):
         rows = [candidate(i) for i in range(19)]
@@ -162,7 +163,8 @@ class ProgressiveFlipbookTest(TestCase):
                   for band in flipbook.BANDS for i in (1, 2)],
             names=("t_min", "energy_bandpassname", "access_url"),
         )
-        with patch.object(flipbook, "warm_all_band_listing", return_value=listing) as shared:
+        self.csv_catalog.return_value = listing
+        with patch.object(flipbook, "warm_all_band_listing") as slow_fallback:
             job = flipbook.start_flipbook(request("all"))
             self.assertEqual(job["requested_band"], "all")
             result = wait_for(job["job_id"], lambda snap: snap["status"] == "complete")
@@ -171,7 +173,8 @@ class ProgressiveFlipbookTest(TestCase):
             self.assertEqual(result["frame_count"], 12)
             self.assertEqual(result["completed_count"], 6)
             self.assertTrue(all(entry["status"] == "ready" for entry in result["bands"].values()))
-            shared.assert_called_once()
+            self.csv_catalog.assert_called_once()
+            slow_fallback.assert_not_called()
 
     def test_center_catalog_precedes_fallback_to_fewer_known_sources(self):
         first = Time("2025-06-01", scale="utc").mjd

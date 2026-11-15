@@ -187,13 +187,13 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
   if (manifest.status === 'empty' && failures) {
     throw new PatchDataError('unavailable', 'The archive found observations, but none could be loaded. Try again shortly.');
   }
+  const qualityWarning = 'Instrument quality flags have not yet been applied.';
   const warnings = (Array.isArray(manifest.limitations) ? manifest.limitations : [])
     .filter(value => typeof value === 'string' && value.trim())
-    .map(value => value.trim());
+    .map(value => value.trim())
+    .filter(value => value !== qualityWarning);
   const zoomMissingOuterCount = validCount(manifest.zoom_missing_outer_count) || 0;
   if (zoomMissingOuterCount) warnings.unshift(`Outer sky pixels could not be loaded from ${zoomMissingOuterCount} selected parent exposure${zoomMissingOuterCount === 1 ? '' : 's'}. The transparent mask is retained.`);
-  const qualityWarning = 'Instrument quality flags have not yet been applied.';
-  if (!warnings.includes(qualityWarning)) warnings.unshift(qualityWarning);
   if (failures) warnings.unshift(`${failures} observation${failures === 1 ? '' : 's'} could not be used (load or coverage issue).`);
   // Older saved sequences can include a sliver of an exposure at the edge of
   // the patch. A missing target wavelength plus low coverage also indicates
@@ -221,7 +221,14 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
       throw new PatchDataError('invalid_response', 'The backend returned incomplete image metadata.');
     }
     const observedAt = utcObservationTime(frame.date_utc);
-    const flags = [{ code: 'quality_unchecked', label: qualityWarning }];
+    const flags = [];
+    if (frame.quality_mask_applied !== true) flags.push({ code: 'quality_unchecked', label: qualityWarning });
+    if (Array.isArray(frame.center_flag_names)) {
+      const names = [...new Set(frame.center_flag_names
+        .filter(name => typeof name === 'string' && name.trim())
+        .map(name => name.trim()))];
+      if (names.length) flags.push({ code: 'archive_flags', label: `Archive quality flags at the target: ${names.join(', ')}.` });
+    }
     if (manifest.status === 'partial' && (failures || manifest.archive_listing_partial || !zoomMissingOuterCount)) {
       flags.push({ code: 'partial_sequence', label: failures
         ? 'Some observations could not be used for this sequence.'

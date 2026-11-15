@@ -1,6 +1,6 @@
 """Build immutable, aligned SPHEREx frame files for a progressive band."""
 
-from math import hypot, isfinite
+from math import ceil, floor, hypot, isfinite
 import re
 from time import monotonic
 from uuid import uuid4
@@ -8,10 +8,13 @@ from uuid import uuid4
 import numpy as np
 from astropy import units as u
 from astropy.coordinates import SkyCoord
+from astropy.time import Time
+from astropy.wcs import WCS
 from reproject import reproject_interp
 
 import config
 from archive import load_cutout
+from henry_fits import BAD_FLAG_BITS, BAD_FLAG_MASK, FLAG_NAMES, read_parent, read_wavelength
 from saved_sources import _trusted_source
 from sequence import finite_number, make_output_grid, product_id_for_source, sky_footprint
 from sequence_disk_cache import STABLE_FRAME_STORAGE
@@ -23,9 +26,14 @@ MASTER_WIDTH_ARCMIN = 20
 # interpolation margin encloses our north-up square even at a 45° rotation.
 CUTOUT_WIDTH_ARCMIN = hypot(MASTER_WIDTH_ARCMIN, MASTER_WIDTH_ARCMIN) + 0.4
 PADDED_CUTOUT_TIMEOUT_SECONDS = 7
+NATIVE_READ_TIMEOUT_SECONDS = 10
+WAVELENGTH_TIMEOUT_SECONDS = 3
 BRIGHTNESS_UNIT = u.MJy / u.sr
 PROGRESSIVE_PIPELINE = "progressive-v1"
 DETECTOR_IN_PRODUCT = re.compile(r"level2_.+_\d+(?P<band>D[1-6])_spx_.+\.fits")
+
+class _UnusableCoverage(ValueError):
+    """The available science data fails the viewer's coverage checks."""
 
 
 def archive_product_matches_band(source_url, band):
@@ -70,6 +78,14 @@ class BandWriter:
             slice((height - 1) // 2, height // 2 + 1),
             slice((width - 1) // 2, width // 2 + 1),
         )
+        # Sampling the edges accounts for curved projected boundaries from
+        # the native detector SIP model. Extra pixels cover bilinear taps.
+        xs = np.linspace(-0.5, width - 0.5, 9)
+        ys = np.linspace(-0.5, height - 0.5, 9)
+        self.boundary_sky = self.wcs.pixel_to_world(
+            np.r_[xs, xs, np.full(9, -0.5), np.full(9, width - 0.5)],
+            np.r_[np.full(9, -0.5), np.full(9, height - 0.5), ys, ys],
+        )
         self.display = None
         self._records = {}
 
@@ -81,13 +97,86 @@ class BandWriter:
         if (str(row["energy_bandpassname"]) != self.detector
                 or not archive_product_matches_band(source_url, self.band)):
             raise ValueError("This exposure belongs to a different SPHEREx detector.")
-        if not isfinite(float(row["t_min"])):
+        time_mjd = float(row["t_min"])
+        if not isfinite(time_mjd):
             raise ValueError("The exposure has no valid observation time.")
 
-        deadline = monotonic() + timeout_seconds
+        started = monotonic()
+        deadline = started + timeout_seconds
+        native_deadline = started + min(NATIVE_READ_TIMEOUT_SECONDS, timeout_seconds * 0.6)
+        try:
+            return self._align_native(source_url, time_mjd, native_deadline, deadline)
+        except _UnusableCoverage:
+            # A successful native read may flag the target as unusable. An
+            # unchecked archive cutout must not make that target valid again.
+            raise
+        except Exception as native_error:
+            now = monotonic()
+            if deadline <= now:
+                raise
+            try:
+                return self._align_archive(row, source_url, deadline, now)
+            except Exception as archive_error:
+                raise archive_error from native_error
+
+    def _native_window(self, header):
+        native_wcs = WCS(header)
+        x, y = native_wcs.world_to_pixel(self.boundary_sky)
+        if not (np.isfinite(x).all() and np.isfinite(y).all()):
+            raise ValueError("The native FITS WCS could not locate the requested sky patch.")
+        x0 = max(0, floor(x.min()) - 2)
+        x1 = min(int(header["NAXIS1"]), ceil(x.max()) + 3)
+        y0 = max(0, floor(y.min()) - 2)
+        y1 = min(int(header["NAXIS2"]), ceil(y.max()) + 3)
+        if not (x0 < x1 and y0 < y1):
+            raise _UnusableCoverage("The requested patch lies outside this observation.")
+        return x0, x1, y0, y1
+
+    def _align_native(self, source_url, time_mjd, native_deadline, deadline):
+        header, image, flags, x0, y0 = read_parent(
+            source_url, self._native_window, deadline=native_deadline,
+        )
+        if image.ndim != 2 or flags.shape != image.shape or flags.dtype.kind not in "iu":
+            raise ValueError("The native FITS image and quality flags do not match.")
+        native_height, native_width = image.shape
+        native_wcs = WCS(header)
+        x, y = (float(value) for value in native_wcs.world_to_pixel(self.coord))
+        local_x, local_y = x - x0, y - y0
+        self._check_center(local_x, local_y, image.shape)
+        cropped_wcs = native_wcs.slice((slice(y0, y0 + native_height), slice(x0, x0 + native_width)))
+        image = np.array(image, dtype=np.float64, copy=True)
+        image[(flags & BAD_FLAG_MASK) != 0] = np.nan
+        aligned, coverage = self._align_image(image, cropped_wcs, header["BUNIT"])
+        center_x = min(max(round(local_x), 0), native_width - 1)
+        center_y = min(max(round(local_y), 0), native_height - 1)
+        center_flags = int(flags[center_y, center_x])
+        flag_names = [FLAG_NAMES.get(bit, f"bit {bit}") for bit in range(32)
+                      if center_flags & (1 << bit)]
+
+        wavelength = bandwidth = None
+        now = monotonic()
+        if now < deadline:
+            try:
+                wavelength, bandwidth = read_wavelength(
+                    source_url, x, y, header, deadline=min(deadline, now + WAVELENGTH_TIMEOUT_SECONDS),
+                )
+            except Exception:
+                # Wavelength lookup is ancillary. Keep the valid science
+                # pixels even if the spectral table cannot be read in time.
+                pass
+
+        return self._frame(
+            aligned, coverage, image.shape, time_mjd, source_url, wavelength, bandwidth,
+            cutout_url=None, processing_method="native_fits_range", quality_mask_applied=True,
+            center_flag_names=flag_names, masked_flag_bits=list(BAD_FLAG_BITS),
+            native_pixel_origin={"x": int(x0), "y": int(y0)},
+        )
+
+    def _align_archive(self, row, source_url, deadline, started):
         # Reserve time for the original width. Some archive cells respond
         # only to a smaller cutout, and this URL may already be cached.
-        padded_timeout = min(PADDED_CUTOUT_TIMEOUT_SECONDS, timeout_seconds / 2)
+        remaining = deadline - started
+        padded_timeout = min(PADDED_CUTOUT_TIMEOUT_SECONDS, remaining / 2)
         try:
             return self._align_cutout(row, source_url, CUTOUT_WIDTH_ARCMIN, padded_timeout)
         except Exception as padded_error:
@@ -104,43 +193,57 @@ class BandWriter:
                              cache=config.CACHE_DOWNLOADS, timeout_seconds=timeout_seconds)
         if cutout["source_url"] != source_url or cutout["detector"] != self.detector:
             raise ValueError("The retrieved exposure differs from the selected parent product.")
-        native_height, native_width = cutout["image"].shape
-        x, y = cutout["target_x"], cutout["target_y"]
-        if not (-0.5 <= x < native_width - 0.5 and -0.5 <= y < native_height - 0.5):
-            raise ValueError("The target lies outside this observation.")
+        image = cutout["image"]
+        self._check_center(cutout["target_x"], cutout["target_y"], image.shape)
+        aligned, coverage = self._align_image(image, cutout["wcs"], cutout["brightness_unit"])
+        return self._frame(
+            aligned, coverage, image.shape, float(row["t_min"]), source_url,
+            cutout.get("wavelength_um"), cutout.get("bandwidth_um"),
+            cutout_url=cutout["cutout_url"], native_cutout_width_arcmin=width,
+            processing_method="irsa_cutout", quality_mask_applied=False,
+        )
 
+    @staticmethod
+    def _check_center(x, y, shape):
+        native_height, native_width = shape
+        if not (-0.5 <= x < native_width - 0.5 and -0.5 <= y < native_height - 0.5):
+            raise _UnusableCoverage("The target lies outside this observation.")
+
+    def _align_image(self, image, wcs, brightness_unit):
         # Each worker gets its own WCS object. wcslib can initialize internal
         # WCS state when transforming coordinates.
-        scale = u.Unit(cutout["brightness_unit"]).to(BRIGHTNESS_UNIT)
+        scale = u.Unit(brightness_unit).to(BRIGHTNESS_UNIT)
         pixels, footprint = reproject_interp(
-            (cutout["image"], cutout["wcs"]), self.wcs.deepcopy(),
+            (image, wcs), self.wcs.deepcopy(),
             shape_out=self.shape, order="bilinear",
         )
         pixels = np.asarray(pixels, dtype=np.float64) * scale
         valid = (footprint > 0) & np.isfinite(pixels)
         coverage = float(np.count_nonzero(valid) / valid.size)
         if coverage < config.MIN_FRAME_COVERAGE_FRACTION:
-            raise ValueError(f"Only {coverage:.1%} of the requested sky patch has valid pixels.")
+            raise _UnusableCoverage(f"Only {coverage:.1%} of the requested sky patch has valid pixels.")
         if not np.all(valid[self.center]):
-            raise ValueError("The target center has no fully valid aligned pixels.")
+            raise _UnusableCoverage("The target center has no fully valid aligned pixels.")
         pixels[~valid] = np.nan
+        return pixels, coverage
 
-        wavelength = finite_number(cutout.get("wavelength_um") or np.nan)
-        bandwidth = finite_number(cutout.get("bandwidth_um") or np.nan)
+    def _frame(self, pixels, coverage, shape, time_mjd, source_url, wavelength, bandwidth, **provenance):
+        native_height, native_width = shape
+        wavelength = finite_number(wavelength) if wavelength is not None else None
+        bandwidth = finite_number(bandwidth) if bandwidth is not None else None
         return {
             "image": pixels,
             "brightness_unit": str(BRIGHTNESS_UNIT),
-            "date_utc": cutout["date_utc"],
-            "time_mjd": cutout["time_mjd"],
+            "date_utc": Time(time_mjd, format="mjd", scale="utc", precision=6).iso,
+            "time_mjd": time_mjd,
             "band": self.band,
             "detector": self.detector,
             "center_wavelength_um": wavelength if wavelength and wavelength > 0 else None,
             "center_bandwidth_um": bandwidth if bandwidth and bandwidth > 0 else None,
             "coverage_fraction": coverage,
-            "native_cutout_width_arcmin": width,
             "native_cutout_dimensions": {"width": native_width, "height": native_height},
             "source_url": source_url,
-            "cutout_url": cutout["cutout_url"],
+            **provenance,
         }
 
     def _set_display(self, frames):
@@ -203,6 +306,14 @@ class BandWriter:
                 "Some exposures use the original 20′ cutout after a wider cutout failed. "
                 "Pixels outside the available archive images remain transparent."
             )
+        checked = sum(frame.get("quality_mask_applied") is True for frame in frames)
+        if checked:
+            cutout_notes.append(
+                f"{checked} exposure(s) use native FITS image sections and mask archive flag bits "
+                f"{', '.join(map(str, BAD_FLAG_BITS))} before WCS alignment."
+            )
+        if checked < len(frames):
+            cutout_notes.append("Archive cutout fallback frames retain transparency but did not apply instrument quality flags.")
         manifest = {
             "sequence_id": self.sequence_id,
             "pipeline": PROGRESSIVE_PIPELINE,
@@ -230,7 +341,6 @@ class BandWriter:
                 *limitations,
                 *cutout_notes,
                 "The wavelength at a sky position can differ between exposures.",
-                "Instrument quality flags have not yet been applied.",
                 "Background and PSF differences have not been corrected.",
                 "Unobserved pixels are transparent. PNG brightness is for visualization.",
             ],

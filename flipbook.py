@@ -21,6 +21,7 @@ import config
 from archive import ArchiveUnavailable, CENTRAL_FALLBACK_RADIUS_ARCSEC, _query_once, search_observations
 from archive_cache import MAX_CACHED_ROWS, cached_search_observations, warm_all_band_listing
 from flipbook_render import BandWriter, archive_product_matches_band
+from henry_catalog import search_catalog
 from saved_sources import find_saved_sources
 from sequence import SequenceRequest
 from sequence_disk_cache import find_saved_sequence
@@ -30,8 +31,9 @@ Band = Literal["D1", "D2", "D3", "D4", "D5", "D6"]
 FlipbookSelection = Band | Literal["all"]
 BANDS = tuple(config.DETECTOR_RANGES_UM)
 FOV_ARCMIN = 20
-MAX_CANDIDATES = 128
+MAX_CANDIDATES = 160
 MAX_BAND_SECONDS = 210
+CSV_CATALOG_SECONDS = 32
 SHARED_QUERY_SECONDS = 6
 CENTER_QUERY_SECONDS = 12
 CUTOUT_TIMEOUT_SECONDS = 18
@@ -242,20 +244,31 @@ def _shared_catalog(job, coord, radius, first, last, deadline, refresh, schedule
                 return job.listing
         if deadline - monotonic() <= 0:
             return None
+        # Ask each release separately, with a small target-centered query.
+        # This avoids the expensive combined search when IRSA is under load.
         try:
-            table = warm_all_band_listing(
-                coord, radius, config.COLLECTIONS, first, last,
-                fetch=lambda center, width, collections, start, end: _query_once(
-                    center, width, collections, start, end, None,
-                    min(deadline, monotonic() + SHARED_QUERY_SECONDS),
-                ),
+            table = search_catalog(
+                coord, first, last, deadline=min(deadline, monotonic() + CSV_CATALOG_SECONDS),
                 refresh=refresh,
             )
         except Exception as exc:
-            logging.info("SPHEREx shared archive lookup did not finish: %s", exc)
+            logging.warning("SPHEREx per-collection lookup unavailable: %s", exc)
             table = None
-        if not isinstance(table, Table) or _listing_incomplete(table):
-            table = _center_catalog(coord, first, last, None, deadline)
+        if table is None or not len(table) and _listing_incomplete(table):
+            try:
+                table = warm_all_band_listing(
+                    coord, radius, config.COLLECTIONS, first, last,
+                    fetch=lambda center, width, collections, start, end: _query_once(
+                        center, width, collections, start, end, None,
+                        min(deadline, monotonic() + SHARED_QUERY_SECONDS),
+                    ),
+                    refresh=refresh,
+                )
+            except Exception as exc:
+                logging.info("SPHEREx shared archive lookup did not finish: %s", exc)
+                table = None
+            if not isinstance(table, Table) or _listing_incomplete(table):
+                table = _center_catalog(coord, first, last, None, deadline)
         job.listing_checked_at = monotonic()
         job.listing_refresh_at = scheduled_at if refresh else None
         job.listing = table

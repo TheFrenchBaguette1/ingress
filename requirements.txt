@@ -4,6 +4,7 @@ matplotlib
 numpy
 pillow
 reproject
+requests>=2.31
 fastapi
 pydantic>=2,<3
 uvicorn

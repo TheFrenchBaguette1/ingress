@@ -130,6 +130,29 @@ test('archive empty, failed, and busy states remain distinct', async () => {
     error => error.code === 'busy' && error.message.includes('already being built'));
 });
 
+test('frame details report only known archive quality flags and mask status', () => {
+  const manifest = sequenceManifest('ready');
+  const coords = parseCoordinates(WISE_0855.ra, WISE_0855.dec);
+  Object.assign(manifest.frames[0], {
+    quality_mask_applied: true, center_flag_names: ['SOURCE', '', null, 'HOT', 'SOURCE'],
+  });
+  Object.assign(manifest.frames[1], { quality_mask_applied: true, center_flag_names: [] });
+
+  const patch = normalizeSequencePatch(manifest, coords, 4, {}, 5);
+  assert.ok(!patch.warnings.some(warning => warning.includes('have not yet been applied')));
+  assert.deepEqual(patch.frames[0].flags.find(flag => flag.code === 'archive_flags'), {
+    code: 'archive_flags', label: 'Archive quality flags at the target: SOURCE, HOT.',
+  });
+  assert.ok(patch.frames.every(frame => !frame.flags.some(flag => flag.code === 'quality_unchecked')));
+  assert.ok(!patch.frames[1].flags.some(flag => flag.code === 'archive_flags'));
+
+  delete manifest.frames[1].quality_mask_applied;
+  const mixed = normalizeSequencePatch(manifest, coords, 4, {}, 5);
+  assert.ok(!mixed.warnings.some(warning => warning.includes('have not yet been applied')));
+  assert.ok(!mixed.frames[0].flags.some(flag => flag.code === 'quality_unchecked'));
+  assert.ok(mixed.frames[1].flags.some(flag => flag.code === 'quality_unchecked'));
+});
+
 test('archive outage and disconnected backend have distinct failure codes', async () => {
   const input = { ra: '180', dec: '-30' };
   await assert.rejects(fetchRealPatch({ ...input, fetchImpl: async () =>

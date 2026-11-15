@@ -14,6 +14,7 @@ from PIL import Image
 from flipbook_render import (
     BandWriter, CUTOUT_WIDTH_ARCMIN, MASTER_WIDTH_ARCMIN, PROGRESSIVE_PIPELINE,
 )
+from henry_fits import BAD_FLAG_BITS, ParentReadUnavailable
 from sequence import SequenceRequest
 from sequence_disk_cache import find_saved_sequence
 from zoom import ZoomRequest, build_zoom
@@ -50,7 +51,10 @@ class ProgressiveFrameTests(unittest.TestCase):
                     "cutout_url": observation["access_url"] + "?size=0.5",
                 }
 
-            with patch("flipbook_render.load_cutout", side_effect=load):
+            with (
+                patch("flipbook_render.read_parent", side_effect=ParentReadUnavailable("bucket unavailable")),
+                patch("flipbook_render.load_cutout", side_effect=load),
+            ):
                 ready = writer.align(late, 5)
                 partial = writer.manifest([ready], candidate_count=2, attempted_count=1,
                                           failure_count=0, status="partial", complete=False)
@@ -117,7 +121,7 @@ class ProgressiveFrameTests(unittest.TestCase):
                     self.assertEqual(timeout_seconds, 7)
                     raise OSError("archive HTTP 503")
                 self.assertEqual(width, MASTER_WIDTH_ARCMIN)
-                self.assertEqual(timeout_seconds, 11)
+                self.assertEqual(timeout_seconds, 10)
                 pixels = np.ones(writer.shape)
                 pixels[:, :40] = np.nan
                 return {
@@ -129,12 +133,17 @@ class ProgressiveFrameTests(unittest.TestCase):
                 }
 
             with (
-                patch("flipbook_render.monotonic", side_effect=[100, 107]),
+                patch("flipbook_render.monotonic", side_effect=[100, 101, 108]),
+                patch("flipbook_render.read_parent", side_effect=ParentReadUnavailable("bucket unavailable")) as native,
                 patch("flipbook_render.load_cutout", side_effect=load) as download,
             ):
                 frame = writer.align(row, 18)
+            self.assertEqual(native.call_args.args[0], source)
+            self.assertEqual(native.call_args.kwargs["deadline"], 110)
             self.assertEqual(download.call_count, 2)
             self.assertEqual(frame["source_url"], source)
+            self.assertEqual(frame["processing_method"], "irsa_cutout")
+            self.assertFalse(frame["quality_mask_applied"])
             self.assertEqual(frame["native_cutout_width_arcmin"], MASTER_WIDTH_ARCMIN)
             self.assertTrue(np.isnan(frame["image"][100, 5]))
             self.assertAlmostEqual(frame["image"][100, 100], 1)
@@ -143,3 +152,108 @@ class ProgressiveFrameTests(unittest.TestCase):
                                        failure_count=0, status="ready")
             self.assertEqual(manifest["request"]["fov_arcmin"], MASTER_WIDTH_ARCMIN)
             self.assertIn("after a wider cutout failed", " ".join(manifest["limitations"]))
+
+    @staticmethod
+    def native_case(directory):
+        request = SimpleNamespace(ra_deg=12.0, dec_deg=75.0, band="D4",
+                                  start_date=date(2025, 5, 1), end_date=date(2025, 7, 1))
+        source = ("https://irsa.ipac.caltech.edu/ibe/data/spherex/dr1/level2/"
+                  "2025W23_1A/l2b-v27-2026-215/4/level2_2025W23_1A_0001_1D4_spx_l2b-v27-2026-215.fits")
+        values = {"access_url": source, "energy_bandpassname": "SPHEREx-D4",
+                  "t_min": Time("2025-06-01T03:04:05.123456").mjd}
+        writer = BandWriter(Path(directory), request, "D4")
+        native = writer.wcs.deepcopy()
+        native.wcs.crpix += np.array([50, 70])
+        header = native.to_header()
+        header.update(NAXIS=2, NAXIS1=340, NAXIS2=340, BUNIT="Jy / sr")
+        return writer, values, header
+
+    def test_native_geometry_masks_flags_before_alignment_without_changing_real_peaks(self):
+        with TemporaryDirectory() as directory:
+            writer, row, header = self.native_case(directory)
+            source = row["access_url"]
+            image = np.full((340, 340), 2e6)
+            image[40 + 70, 30 + 50] = 15e6
+            image[80 + 70, 40 + 50] = np.nan
+            flags = np.zeros(image.shape, dtype=np.int64)
+            for i, bit in enumerate(BAD_FLAG_BITS):
+                flags[110 + 70, 15 + 3 * i + 50] = 1 << bit
+            flags[169:171, 149:151] = 1 << 21  # Known source; advisory, not masked.
+
+            def read(source_url, want, *, deadline):
+                self.assertEqual(source_url, source)
+                self.assertEqual(deadline, 110)
+                x0, x1, y0, y1 = want(header)
+                self.assertLessEqual(x0, 47)
+                self.assertGreaterEqual(x1, 252)
+                self.assertLessEqual(y0, 67)
+                self.assertGreaterEqual(y1, 272)
+                return header, image[y0:y1, x0:x1], flags[y0:y1, x0:x1], x0, y0
+
+            with (
+                patch("flipbook_render.monotonic", side_effect=[100, 102]),
+                patch("flipbook_render.read_parent", side_effect=read),
+                patch("flipbook_render.read_wavelength", return_value=(3.141592, 0.123456)) as wave,
+                patch("flipbook_render.load_cutout") as fallback,
+            ):
+                frame = writer.align(row, 18)
+            fallback.assert_not_called()
+            self.assertEqual(wave.call_args.args[0], source)
+            self.assertAlmostEqual(wave.call_args.args[1], 149.5)
+            self.assertAlmostEqual(wave.call_args.args[2], 169.5)
+            self.assertEqual(wave.call_args.kwargs["deadline"], 105)
+            self.assertEqual(frame["time_mjd"], row["t_min"])
+            self.assertEqual(frame["processing_method"], "native_fits_range")
+            self.assertTrue(frame["quality_mask_applied"])
+            self.assertEqual(frame["center_flag_names"], ["SOURCE"])
+            self.assertEqual(frame["center_wavelength_um"], 3.141592)
+            self.assertEqual(frame["center_bandwidth_um"], 0.123456)
+            self.assertAlmostEqual(frame["image"][40, 30], 15)
+            self.assertAlmostEqual(frame["image"][100, 100], 2)
+            self.assertTrue(np.isnan(frame["image"][80, 40]))
+            for i in range(len(BAD_FLAG_BITS)):
+                self.assertTrue(np.isnan(frame["image"][110, 15 + 3 * i]))
+
+    def test_wavelength_failure_keeps_verified_science_but_native_mask_rejection_does_not_fallback(self):
+        with TemporaryDirectory() as directory:
+            writer, row, header = self.native_case(directory)
+            image = np.full((340, 340), 4e6)
+            flags = np.zeros(image.shape, dtype=np.int64)
+            with (
+                patch("flipbook_render.read_parent", return_value=(header, image, flags, 0, 0)),
+                patch("flipbook_render.read_wavelength", side_effect=OSError("wavelength unavailable")),
+                patch("flipbook_render.load_cutout") as fallback,
+            ):
+                valid = writer.align(row, 18)
+                self.assertTrue(valid["quality_mask_applied"])
+                self.assertIsNone(valid["center_wavelength_um"])
+                self.assertAlmostEqual(valid["image"][100, 100], 4)
+
+                flags[169:171, 149:151] = 1 << 9
+                with self.assertRaisesRegex(ValueError, "target center"):
+                    writer.align(row, 18)
+            fallback.assert_not_called()
+
+    def test_native_window_clamps_at_detector_edge_without_filling_unobserved_sky(self):
+        with TemporaryDirectory() as directory:
+            writer, row, header = self.native_case(directory)
+            header["CRPIX1"] -= 120
+            image = np.full((340, 340), 7e6)
+            flags = np.zeros(image.shape, dtype=np.int64)
+
+            def read(source_url, want, *, deadline):
+                x0, x1, y0, y1 = want(header)
+                self.assertEqual(x0, 0)
+                return header, image[y0:y1, x0:x1], flags[y0:y1, x0:x1], x0, y0
+
+            with (
+                patch("flipbook_render.read_parent", side_effect=read),
+                patch("flipbook_render.read_wavelength", return_value=(3.1, 0.2)),
+                patch("flipbook_render.load_cutout") as fallback,
+            ):
+                frame = writer.align(row, 18)
+            fallback.assert_not_called()
+            self.assertTrue(frame["quality_mask_applied"])
+            self.assertAlmostEqual(frame["image"][100, 100], 7)
+            self.assertTrue(np.isnan(frame["image"][100, 20]))
+            self.assertAlmostEqual(frame["coverage_fraction"], 0.65, delta=0.02)
