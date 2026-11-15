@@ -302,9 +302,6 @@ function paintFrame(frame, index) {
   app.querySelector('.frame-ordinal').textContent = presentation.ordinal;
   app.querySelector('[data-frame-wavelength]').textContent = presentation.wavelength;
   app.querySelector('.wavelength-chip')?.style.setProperty('--band-color', presentation.color);
-  const coverage = app.querySelector('[data-frame-coverage]');
-  const coverageContent = frameCoverage(frame);
-  if (coverage.innerHTML !== coverageContent) coverage.innerHTML = coverageContent;
 
   const scrubber = app.querySelector('[data-range="frame"]');
   scrubber.value = index + 1;
@@ -494,15 +491,6 @@ function framePresentation(frame, band, index, count) {
     scrubberLabel: `Frame ${index + 1} of ${count}, ${dateLabel}${time ? `, ${time} UTC` : ''}, Band ${number}`,
   };
 }
-function frameCoverage(frame) {
-  const patch = state.patch;
-  const coverageNote = frame.flags?.find(flag => flag.code === 'partial_coverage');
-  const outerNote = frame.flags?.find(flag => flag.code === 'zoom_outer_unavailable');
-  return `${coverageNote ? `<p class="coverage-note">${state.fov < (patch.baseFovArcmin || state.fov)
-    ? `The loaded ${esc(patch.baseFovArcmin)}′ master image has ${esc(Math.round((frame.coverageFraction || 0) * 100))}% valid pixels; coverage in this cropped ${esc(state.fov)}′ region can differ.`
-    : esc(coverageNote.label)} Missing pixels are transparent.</p>` : ''}
-    ${outerNote ? `<p class="coverage-note" role="status">${esc(outerNote.label)}</p>` : ''}`;
-}
 function imageStage(frame, band, index, frames) {
   const patch = state.patch;
   const presentation = framePresentation(frame, band, index, frames.length);
@@ -517,8 +505,7 @@ function imageStage(frame, band, index, frames) {
       <div class="image-layer" style="--zoom:${zoom}"><img data-frame-image src="${esc(frame.previewUrl || frame.imageUrl)}" alt="${esc(presentation.imageAlt)}" /></div><div class="crosshair" title="Entered coordinates"></div>
       <div class="compass"><span>N</span><span>↑</span><span>E ←</span></div>
       ${pixelScale ? `<div class="scale-bar" style="--scale-width:${(scaleLength / state.fov * 100).toFixed(1)}%">${scaleLength}′</div>` : ''}<div class="fov-label">${state.fov}′ wide</div>
-    </div><div class="image-caption"><span>Crosshair marks the entered coordinates${pixelScale ? ` · 1 science pixel ≈ ${esc(pixelScale)}″ · display zoom uses nearest-neighbor resampling` : ''}</span><a href="#frame-details-desktop" data-action="show-details">Source and details</a></div>
-    <div data-frame-coverage>${frameCoverage(frame)}</div>`;
+    </div><div class="image-caption"><span>Crosshair marks the entered coordinates${pixelScale ? ` · 1 science pixel ≈ ${esc(pixelScale)}″ · display zoom uses nearest-neighbor resampling` : ''}</span><a href="#frame-details-desktop" data-action="show-details">Source and details</a></div>`;
 }
 function wavelengthComparisonNote(frames) {
   if (frames.length < 2) return '';

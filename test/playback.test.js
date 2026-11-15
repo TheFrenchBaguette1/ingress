@@ -18,7 +18,6 @@ test('playback waits for real images, changes speed, and scrubs without replacin
     ['.frame-date', makeElement()],
     ['.frame-ordinal', ordinal],
     ['[data-frame-wavelength]', makeElement()],
-    ['[data-frame-coverage]', makeElement()],
     ['[data-range="frame"]', scrubber],
     ['[data-action="play"]', playback],
   ]);
