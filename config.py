@@ -4,7 +4,10 @@ from pathlib import Path
 
 COLLECTIONS = ["spherex_dr1", "spherex_qr3"]
 CACHE_DOWNLOADS = True
-TIMEOUT_SECONDS = 120
+TIMEOUT_SECONDS = 25
+MAX_BUILD_SECONDS = 120
+MAX_CUTOUT_ATTEMPTS = 12
+MAX_USABLE_FRAMES = 8
 
 # ---------- Output settings ----------
 

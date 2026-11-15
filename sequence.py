@@ -1,6 +1,7 @@
 import json
 from datetime import date, timedelta
 from math import ceil, sqrt
+from time import monotonic
 from typing import Literal
 from uuid import uuid4
 
@@ -81,6 +82,27 @@ def finite_number(value):
     return value if np.isfinite(value) else None
 
 
+def time_spread_indexes(times, count):
+    """Try distinct epochs first, then fill the largest gaps if they fail."""
+    if len(times) <= count:
+        return list(range(len(times)))
+    times = np.asarray(times, dtype=float)
+    chosen = []
+    for target in np.linspace(times[0], times[-1], min(config.MAX_USABLE_FRAMES, count)):
+        for index in np.argsort(np.abs(times - target), kind="stable"):
+            if int(index) not in chosen:
+                chosen.append(int(index))
+                break
+    while len(chosen) < count:
+        # This also spreads observations when many have an identical timestamp.
+        span = times[-1] - times[0]
+        positions = times if span > 0 else np.arange(len(times))
+        scores = np.min(np.abs(positions[:, None] - positions[chosen]), axis=1)
+        scores[chosen] = -1
+        chosen.append(int(np.argmax(scores)))
+    return chosen
+
+
 # ---------- Sequence generation ----------
 
 def build_sequence(request):
@@ -154,11 +176,23 @@ def build_sequence(request):
         flush=True,
     )
 
-    for index, observation in enumerate(unique_candidates, start=1):
+    total_candidates = len(unique_candidates)
+    plan = time_spread_indexes(
+        [float(row["t_min"]) for row in unique_candidates],
+        min(total_candidates, config.MAX_CUTOUT_ATTEMPTS),
+    )
+    deadline = monotonic() + config.MAX_BUILD_SECONDS
+    attempted_count = 0
+
+    for candidate_index in plan:
+        if len(frames) >= config.MAX_USABLE_FRAMES or monotonic() >= deadline:
+            break
+        observation = unique_candidates[candidate_index]
+        attempted_count += 1
         source_url = str(observation["access_url"])
 
         print(
-            f"[{index}/{len(unique_candidates)}] Loading cutout...",
+            f"[{attempted_count}/{len(plan)}] Loading cutout...",
             flush=True,
         )
 
@@ -168,7 +202,7 @@ def build_sequence(request):
                 coord,
                 request.fov_arcmin,
                 cache=config.CACHE_DOWNLOADS,
-                timeout_seconds=config.TIMEOUT_SECONDS,
+                timeout_seconds=min(config.TIMEOUT_SECONDS, max(1, deadline - monotonic())),
             )
 
             unit = str(cutout["brightness_unit"]).strip()
@@ -336,13 +370,30 @@ def build_sequence(request):
     else:
         status = "ready"
 
+    limitations = [
+        "The wavelength at a sky position can differ between exposures.",
+        "Instrument quality flags have not yet been applied.",
+        "Background and PSF differences have not been corrected.",
+        "Some frames may cover only part of the requested field.",
+        "PNG values are for visualization, not photometry.",
+    ]
+    if total_candidates > attempted_count:
+        limitations.insert(
+            0,
+            f"Time-spread sample: attempted {attempted_count} of "
+            f"{total_candidates} available exposures; some dates were skipped "
+            "to keep the search responsive.",
+        )
+
     manifest = {
         "sequence_id": sequence_id,
         "status": status,
         "request": request.model_dump(mode="json"),
         "date_policy": "UTC calendar dates; both selected days included",
-        "selection_policy": "individual exposures from the selected detector",
-        "candidate_count": len(unique_candidates),
+        "selection_policy": "time-spread sample of individual exposures from the selected detector",
+        "candidate_count": total_candidates,
+        "attempted_count": attempted_count,
+        "skipped_count": total_candidates - attempted_count,
         "frame_count": len(exported_frames),
         "can_animate": len(exported_frames) >= 2,
         "grid": {
@@ -360,13 +411,7 @@ def build_sequence(request):
         "frames": exported_frames,
         "failures": failures,
         "manifest_url": f"/outputs/{sequence_id}/manifest.json",
-        "limitations": [
-            "The wavelength at a sky position can differ between exposures.",
-            "Instrument quality flags have not yet been applied.",
-            "Background and PSF differences have not been corrected.",
-            "Some frames may cover only part of the requested field.",
-            "PNG values are for visualization, not photometry.",
-        ],
+        "limitations": limitations,
     }
 
     (output_dir / "manifest.json").write_text(

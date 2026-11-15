@@ -1,4 +1,5 @@
 import logging
+from collections import OrderedDict
 from threading import Lock
 
 from fastapi import FastAPI, HTTPException
@@ -29,6 +30,9 @@ app.mount(
 
 # Keep this first prototype to one sequence build at a time.
 build_lock = Lock()
+cache_lock = Lock()
+sequence_cache = OrderedDict()
+MAX_CACHED_SEQUENCES = 32
 
 
 @app.get("/bands")
@@ -46,6 +50,13 @@ def get_bands():
 
 @app.post("/sequence")
 def create_sequence(request: SequenceRequest):
+    key = request.model_dump_json()
+    with cache_lock:
+        cached = sequence_cache.get(key)
+        if cached is not None:
+            sequence_cache.move_to_end(key)
+            return cached
+
     if not build_lock.acquire(blocking=False):
         raise HTTPException(
             status_code=409,
@@ -53,7 +64,13 @@ def create_sequence(request: SequenceRequest):
         )
 
     try:
-        return build_sequence(request)
+        result = build_sequence(request)
+        with cache_lock:
+            sequence_cache[key] = result
+            sequence_cache.move_to_end(key)
+            if len(sequence_cache) > MAX_CACHED_SEQUENCES:
+                sequence_cache.popitem(last=False)
+        return result
 
     except Exception:
         logging.exception("Sequence generation failed.")

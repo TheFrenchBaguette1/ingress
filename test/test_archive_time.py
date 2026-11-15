@@ -10,8 +10,10 @@ from astropy.coordinates import SkyCoord
 from astropy.table import Table
 from astropy.time import Time
 
+import config
+from api import create_sequence, sequence_cache
 from archive import search_observations
-from sequence import SequenceRequest, build_sequence
+from sequence import SequenceRequest, build_sequence, time_spread_indexes
 
 
 class ArchiveTimeTests(unittest.TestCase):
@@ -56,6 +58,50 @@ class ArchiveTimeTests(unittest.TestCase):
         self.assertEqual(manifest["request"]["dec_deg"], -85)
         self.assertEqual(search.call_args.args[3].isot, "2022-05-01T00:00:00.000")
         self.assertEqual(search.call_args.args[4].isot, "2026-12-01T00:00:00.000")
+
+    def test_many_exposures_have_a_bounded_time_spread_sample(self):
+        times = [Time("2025-05-01").mjd + index * 3 for index in range(102)]
+        chosen = time_spread_indexes(times, config.MAX_CUTOUT_ATTEMPTS)
+        self.assertEqual(len(chosen), config.MAX_CUTOUT_ATTEMPTS)
+        self.assertEqual(len(set(chosen)), config.MAX_CUTOUT_ATTEMPTS)
+        self.assertEqual(chosen[0], 0)
+        self.assertEqual(chosen[7], 101)
+
+        observations = Table(
+            [times, ["SPHEREx-D4"] * 102,
+             [f"https://example.org/{index}.fits" for index in range(102)]],
+            names=["t_min", "energy_bandpassname", "access_url"],
+        )
+        request = SequenceRequest(
+            ra_deg=120, dec_deg=-85, start_date="2025-05-01",
+            end_date="2026-11-15", fov_arcmin=5, band="D4",
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("sequence.config.OUTPUT_ROOT", Path(temporary)),
+            patch("sequence.search_observations", return_value=observations),
+            patch("sequence.load_cutout", side_effect=OSError("archive 503")) as load,
+        ):
+            manifest = build_sequence(request)
+
+        self.assertEqual(load.call_count, config.MAX_CUTOUT_ATTEMPTS)
+        self.assertEqual(manifest["candidate_count"], 102)
+        self.assertEqual(manifest["attempted_count"], config.MAX_CUTOUT_ATTEMPTS)
+        self.assertEqual(manifest["skipped_count"], 102 - config.MAX_CUTOUT_ATTEMPTS)
+        self.assertTrue(any("Time-spread sample" in note for note in manifest["limitations"]))
+
+    def test_same_request_reuses_completed_sequence(self):
+        request = SequenceRequest(
+            ra_deg=120, dec_deg=-85, start_date="2025-05-01",
+            end_date="2026-11-15", fov_arcmin=5, band="D4",
+        )
+        sequence_cache.clear()
+        with patch("api.build_sequence", return_value={"status": "ready"}) as build:
+            first = create_sequence(request)
+            second = create_sequence(request)
+        self.assertIs(first, second)
+        build.assert_called_once_with(request)
+        sequence_cache.clear()
 
 
 if __name__ == "__main__":
