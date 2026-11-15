@@ -7,6 +7,7 @@ import os
 from collections import OrderedDict
 from datetime import datetime, timezone
 from threading import Lock
+from time import time as unix_time
 from uuid import uuid4
 
 from astropy.table import Table
@@ -57,6 +58,7 @@ def _read_disk_listing(key):
             return None
         listing = Table(rows=rows, names=("t_min", "energy_bandpassname", "access_url"))
         listing.meta["archive_listing_cached"] = True
+        listing.meta["_cache_saved_at"] = payload["saved_at"]
         return listing
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return None
@@ -98,7 +100,8 @@ def _write_disk_listing(key, results):
 
 
 def cached_search_observations(
-    coord, search_radius_arcsec, collections, start_time, end_time, fetch, *, band=None
+    coord, search_radius_arcsec, collections, start_time, end_time, fetch, *, band=None,
+    refresh=False,
 ):
     """Return a private copy of an exact sky/UTC query's observation table.
 
@@ -115,26 +118,34 @@ def cached_search_observations(
     # six-part key without `band`. These are still valid for any detector and
     # particularly useful during an archive outage.
     legacy_key = key[:-1] if band is not None else None
-    with _lock:
-        cached = _listings.get(key)
-        if cached is None and legacy_key is not None:
-            cached = _listings.get(legacy_key)
-        if cached is not None:
-            _listings.move_to_end(key if key in _listings else legacy_key)
-            reused = cached.copy(copy_data=True)
-            reused.meta["archive_listing_cached"] = True
-            return reused
-
-    saved = _read_disk_listing(key)
-    if saved is None and legacy_key is not None:
-        saved = _read_disk_listing(legacy_key)
-    if saved is not None:
+    if not refresh:
         with _lock:
-            _listings[key] = saved.copy(copy_data=True)
-            _listings.move_to_end(key)
-            if len(_listings) > MAX_CACHED_LISTINGS:
-                _listings.popitem(last=False)
-        return saved.copy(copy_data=True)
+            for candidate_key in (key, legacy_key):
+                if candidate_key is None:
+                    continue
+                cached = _listings.get(candidate_key)
+                if cached is None:
+                    continue
+                listing, saved_at = cached
+                if not 0 <= unix_time() - saved_at <= DISK_TTL_SECONDS:
+                    _listings.pop(candidate_key)
+                    continue
+                _listings.move_to_end(candidate_key)
+                reused = listing.copy(copy_data=True)
+                reused.meta["archive_listing_cached"] = True
+                return reused
+
+        saved = _read_disk_listing(key)
+        if saved is None and legacy_key is not None:
+            saved = _read_disk_listing(legacy_key)
+        if saved is not None:
+            saved_at = saved.meta.pop("_cache_saved_at")
+            with _lock:
+                _listings[key] = (saved.copy(copy_data=True), saved_at)
+                _listings.move_to_end(key)
+                if len(_listings) > MAX_CACHED_LISTINGS:
+                    _listings.popitem(last=False)
+            return saved.copy(copy_data=True)
 
     args = (coord, search_radius_arcsec, collections, start_time, end_time)
     results = fetch(*args, band=band) if band is not None else fetch(*args)
@@ -143,7 +154,7 @@ def cached_search_observations(
     if (isinstance(results, Table) and 0 < len(results) <= MAX_CACHED_ROWS
             and not results.meta.get("archive_listing_partial")):
         with _lock:
-            _listings[key] = results.copy(copy_data=True)
+            _listings[key] = (results.copy(copy_data=True), unix_time())
             _listings.move_to_end(key)
             if len(_listings) > MAX_CACHED_LISTINGS:
                 _listings.popitem(last=False)

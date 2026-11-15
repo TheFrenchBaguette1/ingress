@@ -109,7 +109,7 @@ def time_spread_indexes(times, count):
 
 # ---------- Sequence generation ----------
 
-def build_sequence(request):
+def build_sequence(request, *, refresh=False):
     coord = SkyCoord(
         request.ra_deg,
         request.dec_deg,
@@ -161,6 +161,7 @@ def build_sequence(request):
             Time(available_end_exclusive.isoformat(), scale="utc"),
             fetch=lookup_with_saved_sources,
             band=request.band,
+            refresh=refresh,
         )
 
     times = np.asarray(results["t_min"], dtype=float)

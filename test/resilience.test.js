@@ -81,7 +81,7 @@ test('a 20-minute field never silently displays a 5-minute example, and a differ
   await flush(); await flush();
   assert.deepEqual(calls.map(call => call.url), ['/api/sequence']);
   assert.match(app.innerHTML, /Could not load this patch/);
-  assert.match(app.innerHTML, /View saved real observations \(5′\)/);
+  assert.match(app.innerHTML, /View saved real observations at RA 180°, Dec −30° \(5′\)/);
   assert.doesNotMatch(app.innerHTML, /frame_000\.png/);
 
   click('saved-real');

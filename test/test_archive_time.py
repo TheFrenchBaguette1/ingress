@@ -275,10 +275,17 @@ class ArchiveTimeTests(unittest.TestCase):
             end_date="2026-11-15", fov_arcmin=5, band="D4",
         )
         sequence_cache.clear()
+        sequence_id = "b" * 32
+        completed = {
+            "status": "ready", "sequence_id": sequence_id,
+            "request": request.model_dump(mode="json"), "frame_count": 1,
+            "frames": [{"image_url": f"/outputs/{sequence_id}/frame_000.png"}],
+        }
         with (
             tempfile.TemporaryDirectory() as temporary,
             patch("api.config.OUTPUT_ROOT", Path(temporary)),
-            patch("api.build_sequence", return_value={"status": "ready"}) as build,
+            patch("api.intact_saved_frames", return_value=True),
+            patch("api.build_sequence", return_value=completed) as build,
         ):
             first = create_sequence(request)
             second = create_sequence(request)

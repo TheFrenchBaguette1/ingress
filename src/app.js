@@ -235,7 +235,7 @@ function statusCard(kind) {
   }
   return `<main class="state-main"><div class="state-card" role="alert"><span class="state-icon">⚠</span><h1>Could not load this patch</h1>
     <p>${esc(state.error?.message || 'The data service did not answer. Please try again.')}</p><p>Your search has not been replaced with simulated data.</p>
-    <div class="actions"><button class="primary-button" data-action="retry">Try again</button><button class="pill-button" data-action="home">Change coordinates</button>${state.source === 'real' ? '<button class="pill-button" data-action="saved-real">View saved real observations (5′)</button>' : ''}${lastRealView && state.source === 'real' ? '<button class="pill-button" data-action="return-real">Return to last real view</button>' : ''}<button class="pill-button" data-action="try-wise">View WISE 0855 demo</button></div>
+    <div class="actions"><button class="primary-button" data-action="retry">Try again</button><button class="pill-button" data-action="home">Change coordinates</button>${state.source === 'real' ? '<button class="pill-button" data-action="saved-real">View saved real observations at RA 180°, Dec −30° (5′)</button>' : ''}${lastRealView && state.source === 'real' ? '<button class="pill-button" data-action="return-real">Return to last real view</button>' : ''}<button class="pill-button" data-action="try-wise">View WISE 0855 demo</button></div>
     <details><summary>Technical details</summary><p>${esc(state.error?.code || 'request_failed')}</p></details></div></main>`;
 }
 function imageStage(frame, band, index, frames) {
@@ -255,7 +255,7 @@ function imageStage(frame, band, index, frames) {
       ${synthetic ? '<div class="image-watermark">SYNTHETIC DEMO — NOT SPHEREx OBSERVATIONS</div>' : ''}
       <div class="compass"><span>N</span><span>↑</span><span>E ←</span></div>
       ${pixelScale ? `<div class="scale-bar" style="--scale-width:${(scaleLength / state.fov * 100).toFixed(1)}%">${scaleLength}′</div>` : ''}<div class="fov-label">${state.fov}′ wide</div>
-    </div><div class="image-caption"><span>Crosshair marks the entered coordinates${pixelScale ? ` · 1 pixel ≈ ${esc(pixelScale)}″ of sky` : ''}</span><a href="#frame-details-desktop" data-action="show-details">Source and details</a></div>
+    </div><div class="image-caption"><span>Crosshair marks the entered coordinates${pixelScale && !synthetic ? ` · 1 pixel ≈ ${esc(pixelScale)}″ of sky` : ''}</span><a href="#frame-details-desktop" data-action="show-details">Source and details</a></div>
     ${coverageNote ? `<p class="coverage-note">${esc(coverageNote.label)} Missing pixels are dark.</p>` : ''}`;
 }
 function wavelengthComparisonNote(frames, source) {
@@ -296,7 +296,7 @@ function timeline(frames, band) {
       <div class="timeline-range"><label for="range-from">From</label><input class="date-input" id="range-from" data-range="from" type="date" value="${esc(state.from)}" min="2025-05-01" max="${new Date().toISOString().slice(0, 10)}" aria-label="Earliest UTC date">
       <label for="range-to">to</label><input class="date-input" id="range-to" data-range="to" type="date" value="${esc(state.to)}" min="2025-05-01" max="${new Date().toISOString().slice(0, 10)}" aria-label="Latest UTC date">
       <button type="button" class="pill-button" data-action="clear-range" ${!state.from && !state.to ? 'disabled' : ''}>All dates</button></div></div>
-      <div class="timeline-summary ${frames.length ? '' : 'empty'}">${frames.length ? `Showing ${frames.length} of ${all.length} loaded frames at ${esc(rangeLabel(band))}${sampled}` : `No frames at ${esc(rangeLabel(band))} in this date range. Widen the range or choose another wavelength.`}</div>
+      <div class="timeline-summary ${frames.length ? '' : 'empty'}">${frames.length ? `Showing ${frames.length} of ${all.length} loaded frames at ${esc(rangeLabel(band))}${sampled}` : `No loaded frames at ${esc(rangeLabel(band))} in this date range. ${patch.source === 'real' ? 'Search this date range to check the archive.' : 'Widen the range or choose another wavelength.'}`}</div>
       ${wavelengthComparisonNote(frames, patch.source)}
       <div class="timeline-content"><div class="playback"><button type="button" class="soft-button" data-action="prev" ${frames.length < 2 ? 'disabled' : ''} aria-label="Previous frame">Ⅰ◀</button>
       <button type="button" class="primary-button" data-action="play" ${frames.length < 2 ? 'disabled' : ''} aria-label="${state.playing ? 'Pause' : 'Play'} timeline">${state.playing ? '❚❚ Pause' : '▶ Play'}</button>
@@ -336,12 +336,13 @@ function viewer() {
   const frame = currentFrame();
   const synthetic = patch.source === 'synthetic';
   return `<main class="viewer-layout"><div class="viewer-main"><div class="stage">
-    <div class="provenance"><span class="status-badge ${synthetic ? 'synthetic' : patch.bundledRealExample ? 'saved-real' : 'real'}" data-real-badge>${synthetic ? '⚠ Synthetic demo — not SPHEREx observations' : patch.bundledRealExample ? 'Saved real SPHEREx observations' : 'Loading real image…'}</span>
+    <div class="provenance"><span class="status-badge ${synthetic ? 'synthetic' : patch.bundledRealExample ? 'saved-real' : 'real'}" data-real-badge>${synthetic ? '⚠ Synthetic demo — not SPHEREx observations' : patch.bundledRealExample ? 'Saved real SPHEREx observations' : frame ? 'Loading real image…' : 'Real SPHEREx observations'}</span>
     <span class="target-name">${esc(patch.target.name || 'Your patch')} · <span class="mono muted">RA ${esc(state.ra)} · Dec ${esc(state.dec)}</span></span>
     ${patch.backendStatus === 'partial' ? `<span class="partial-note" role="status">${patch.failureCount ? `Partial sequence · ${patch.failureCount} exposure${patch.failureCount === 1 ? '' : 's'} could not be used` : 'Partial date coverage · the archive search was incomplete'}</span>` : ''}</div>
     ${patch.bundledRealExample ? `<div class="saved-real-banner" role="status"><div><strong>Saved real observations · RA 180°, Dec −30° · Band 4 · 5′</strong><p>${state.sampleFallback ? `${esc(state.sampleFallback.message)} ` : ''}These SPHEREx frames were prepared earlier. They are a fixed snapshot, not a live search or simulated images; newly released observations may be missing.</p></div><button type="button" class="pill-button" data-action="retry">Retry live search</button></div>` : ''}
+    ${patch.backendStatus === 'partial' && !patch.bundledRealExample ? `<div class="saved-real-banner" role="status"><div><strong>${patch.cachedPartial ? 'Cached partial real observations' : 'Partial real observations'}</strong><p>${patch.cachedPartial ? 'These actual SPHEREx frames were reused from a recent search. ' : ''}Some observations or dates may be missing. Refresh to check the archive again.</p></div><button type="button" class="pill-button" data-action="refresh-observations">Refresh observations</button></div>` : ''}
     ${state.recovery && !synthetic ? `<div class="recovery-banner" role="status"><div><strong>Showing previously loaded real observations</strong><p>${esc(state.recovery.error.message)} The new search (Band ${state.recovery.attempted.band}, ${state.recovery.attempted.fov}′ wide) did not load. The images below are from your last successful view of this sky position; they are not simulated or new results.</p></div><button type="button" class="pill-button" data-action="retry-failed-query">Retry new search</button></div>` : ''}
-    ${frame ? imageStage(frame, band, frames.indexOf(frame), frames) : `<div class="state-card" role="status"><h2>No frames in this range</h2><p>There are no ${esc(rangeLabel(band))} images between the selected dates. Clear dates or pick another wavelength.</p><button class="pill-button" data-action="clear-range">All dates</button></div>`}
+    ${frame ? imageStage(frame, band, frames.indexOf(frame), frames) : `<div class="state-card" role="status"><h2>No loaded frames in this range</h2><p>${synthetic ? 'This example has no images on the selected dates.' : 'The loaded SPHEREx sample has no frames on the selected dates. The archive may have other observations.'}</p>${synthetic ? '' : '<button class="pill-button" data-action="search-date-range">Search this date range</button>'}<button class="pill-button" data-action="clear-range">All dates</button></div>`}
     ${timeline(frames, band)}
     <div class="mobile-actions"><button class="soft-button" type="button" data-action="open-bands">Wavelength · ${esc(rangeLabel(band))}</button><button class="soft-button" type="button" data-action="open-details">Details &amp; width</button></div>
     </div></div>${settingsPanel()}</main>${state.drawer ? `<dialog class="mobile-drawer" aria-label="${state.drawer === 'bands' ? 'Wavelength settings' : 'Frame details and field of view'}"><div class="drawer-head"><h2>${state.drawer === 'bands' ? 'Wavelength' : 'Details'}</h2><button class="soft-button" type="button" data-action="close-drawer" aria-label="Close panel">Close ✕</button></div>${settingsPanel(state.drawer, 'mobile')}</dialog>` : ''}`;
@@ -360,11 +361,18 @@ function readForm(form) {
   const dec = String(data.get('dec') || '').trim();
   const previousQuery = [state.ra, state.dec, state.from, state.to].join('|');
   const headerForm = form.id === 'header-form';
+  const previousCoords = parseCoordinates(state.ra, state.dec);
   if (headerForm) { state.headerRa = ra; state.headerDec = dec; }
   else { state.ra = ra; state.dec = dec; }
   if (form.id === 'home-form') { state.from = String(data.get('from') || ''); state.to = String(data.get('to') || ''); }
   if (state.from && state.to && state.from > state.to) [state.from,state.to] = [state.to,state.from];
   const coords = parseCoordinates(ra, dec);
+  if (headerForm && coords.isValid && (!previousCoords.isValid ||
+      Math.abs(coords.raDeg - previousCoords.raDeg) > 1e-8 ||
+      Math.abs(coords.decDeg - previousCoords.decDeg) > 1e-8)) {
+    state.from = '';
+    state.to = '';
+  }
   state.raError = coords.raError;
   state.decError = coords.decError;
   state.dateError = (state.from && !validDate(state.from) || state.to && !validDate(state.to)) ? 'Enter valid dates.' : '';
@@ -426,7 +434,8 @@ async function loadPatch({ forceRefresh = false } = {}) {
       ? await loadDemoPatch({ ra: state.ra, dec: state.dec, signal: controller.signal })
       : (!forceRefresh && realCache.get(cacheKey)) || await retryWhileBusy(
         () => fetchRealPatch({ ra: state.ra, dec: state.dec, fov: state.fov,
-          from: state.from, to: state.to, band, signal: controller.signal }),
+          from: state.from, to: state.to, band, refresh: forceRefresh,
+          signal: controller.signal }),
         { signal: controller.signal, onBusy: () => {
           if (sequence !== loadSequence || state.request?.waiting) return;
           state.request.waiting = true;
@@ -502,6 +511,7 @@ function changeSource(source) {
 }
 function setBand(number) {
   if (!state.patch?.bands.some(b => b.number === number)) return;
+  if (number === state.band) return;
   const oldDate = state.activeDateId;
   state.band = number; stopPlayback();
   state.activeDateId = oldDate;
@@ -513,6 +523,11 @@ function setFov(value, custom = false) {
   const max = state.patch?.source === 'synthetic' ? 20 : Math.min(20, state.patch?.fovMaxArcmin || 20);
   const fov = Number(value);
   if (!Number.isInteger(fov) || fov < 3 || fov > max) return;
+  if (fov === state.fov) {
+    state.customFov = custom;
+    syncUrl(); render();
+    return;
+  }
   state.fov = fov; state.customFov = custom;
   if (state.view === 'viewer' && state.source === 'real') loadPatch();
   else { syncUrl(); render(); }
@@ -555,6 +570,8 @@ app.addEventListener('click', event => {
     if (!state.customFov && state.fov === defaultFov(state.source)) state.fov = defaultFov('synthetic');
     state.ra = WISE_0855.ra; state.dec = WISE_0855.dec; state.source = 'synthetic'; state.from = ''; state.to = ''; state.band = 4; state.activeDateId = ''; loadPatch();
   } else if (action === 'retry') loadPatch({ forceRefresh: true });
+  else if (action === 'refresh-observations') loadPatch({ forceRefresh: true });
+  else if (action === 'search-date-range') loadPatch({ forceRefresh: true });
   else if (action === 'saved-real') showSavedRealExample();
   else if (action === 'retry-failed-query' && state.recovery) {
     Object.assign(state, state.recovery.attempted);

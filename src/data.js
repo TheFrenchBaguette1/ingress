@@ -278,6 +278,7 @@ export function normalizeSequencePatch(manifest, requestedTarget, requestedBand,
     status: manifest.status === 'empty' ? 'empty' : 'ok',
     backendStatus: manifest.status,
     archiveListingPartial: manifest.archive_listing_partial === true,
+    cachedPartial: manifest.cached_partial === true && manifest.status === 'partial',
     target: { ...requestedTarget, name: requestedTarget.name || 'Your patch' },
     dates,
     bands: BAND_INFO.map(band => ({ ...band })),
@@ -324,7 +325,7 @@ export async function loadBundledRealPatch({ signal, fetchImpl = fetch } = {}) {
   }
 }
 
-export async function fetchRealPatch({ ra, dec, fov = 5, from = '', to = '', band = 4, signal, fetchImpl = fetch }) {
+export async function fetchRealPatch({ ra, dec, fov = 5, from = '', to = '', band = 4, refresh = false, signal, fetchImpl = fetch }) {
   const coords = parseCoordinates(ra, dec);
   if (!coords.isValid) {
     throw new PatchDataError('invalid_request', coords.raError || coords.decError);
@@ -344,7 +345,7 @@ export async function fetchRealPatch({ ra, dec, fov = 5, from = '', to = '', ban
   };
   let response;
   try {
-    response = await fetchImpl('/api/sequence', {
+    response = await fetchImpl(refresh ? '/api/sequence?refresh=1' : '/api/sequence', {
       method: 'POST', signal,
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

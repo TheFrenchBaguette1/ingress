@@ -2,6 +2,7 @@
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -149,6 +150,38 @@ class ArchiveCacheTests(unittest.TestCase):
         saved.write_text(json.dumps(payload), encoding="utf-8")
         clear_archive_cache()
         cached_search_observations(coord, 300, ["dr1"], start, end, fetch)
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_in_process_listing_expires_too(self):
+        coord = SkyCoord(120, -85, unit="deg")
+        start, end = Time("2025-05-01"), Time("2025-06-01")
+        listing = Table(
+            [[Time("2025-05-03").mjd], ["SPHEREx-D4"], ["https://example.org/a.fits"]],
+            names=["t_min", "energy_bandpassname", "access_url"],
+        )
+        fetch = Mock(return_value=listing)
+        cached_search_observations(coord, 300, ["dr1"], start, end, fetch)
+        saved = next((Path(self.temporary.name) / ".archive-listings").glob("*.json"))
+        payload = json.loads(saved.read_text(encoding="utf-8"))
+        payload["saved_at"] = 0  # Simulate a stale on-disk listing too.
+        saved.write_text(json.dumps(payload), encoding="utf-8")
+        with patch("archive_cache.unix_time", return_value=time.time() + 3601):
+            cached_search_observations(coord, 300, ["dr1"], start, end, fetch)
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_refresh_requeries_even_with_warm_listing(self):
+        coord = SkyCoord(120, -85, unit="deg")
+        start, end = Time("2025-05-01"), Time("2025-06-01")
+        listing = Table(
+            [[Time("2025-05-03").mjd], ["SPHEREx-D4"], ["https://example.org/a.fits"]],
+            names=["t_min", "energy_bandpassname", "access_url"],
+        )
+        fetch = Mock(return_value=listing)
+        cached_search_observations(coord, 300, ["dr1"], start, end, fetch, band="D4")
+        cached_search_observations(
+            coord, 300, ["dr1"], start, end, fetch, band="D4", refresh=True,
+        )
+        cached_search_observations(coord, 300, ["dr1"], start, end, fetch, band="D4")
         self.assertEqual(fetch.call_count, 2)
 
     def test_saved_listing_requires_exact_sky_and_utc_interval(self):

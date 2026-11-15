@@ -89,6 +89,7 @@ test('real adapter posts a single detector and maps backend frames without losin
   assert.equal(patch.source, 'real');
   assert.equal(patch.status, 'ok');
   assert.equal(patch.backendStatus, 'partial');
+  assert.equal(patch.cachedPartial, false);
   assert.equal(patch.bands.length, 6);
   assert.deepEqual(patch.bands.map(band => band.rangeUm), [
     [0.744, 1.116], [1.099, 1.651], [1.636, 2.421],
@@ -110,6 +111,16 @@ test('real adapter posts a single detector and maps backend frames without losin
   assert.ok(patch.frames[0].flags.some(flag => flag.code === 'partial_sequence'));
   assert.equal(patch.failureCount, 1);
   assert.ok(patch.warnings.some(w => w.includes('could not be used')));
+
+  const cachedManifest = sequenceManifest();
+  cachedManifest.cached_partial = true;
+  const refreshed = await fetchRealPatch({ ra: WISE_0855.ra, dec: WISE_0855.dec,
+    band: 4, refresh: true, fetchImpl: async (url, options) => {
+      assert.equal(url, '/api/sequence?refresh=1');
+      assert.deepEqual(JSON.parse(options.body), body);
+      return new Response(JSON.stringify(cachedManifest), { status: 200 });
+    } });
+  assert.equal(refreshed.cachedPartial, true);
 });
 
 test('archive empty, failed, and busy states remain distinct', async () => {
