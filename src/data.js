@@ -113,8 +113,8 @@ function isoDate(value) {
 
 function positiveFov(value) {
   const fov = Number(value);
-  if (!Number.isFinite(fov) || fov < 3 || fov > 20) {
-    throw new PatchDataError('invalid_request', 'Field of view must be from 3′ to 20′.');
+  if (!Number.isFinite(fov) || fov < 1 || fov > 20) {
+    throw new PatchDataError('invalid_request', 'Field of view must be from 1′ to 20′.');
   }
   return fov;
 }
@@ -388,13 +388,14 @@ export async function restoreRealSequence({ sequenceId, ra, dec, band, fov, sign
 
 const PREPARATION_BANDS = Object.freeze(['D1', 'D2', 'D3', 'D4', 'D5', 'D6']);
 
-function preparationPayload(payload, jobId) {
+function preparationPayload(payload, jobId, { progressive = false } = {}) {
+  const allowed = ['queued', 'running', 'ready', 'partial', 'empty', 'unavailable'];
+  if (progressive) allowed.push('idle');
   if (!payload || payload.job_id !== jobId ||
       !['running', 'complete'].includes(payload.status) ||
       payload.canonical_fov_arcmin !== 20 ||
       !payload.bands || typeof payload.bands !== 'object' ||
-      !PREPARATION_BANDS.every(band => payload.bands[band] &&
-        ['queued', 'running', 'ready', 'partial', 'empty', 'unavailable'].includes(payload.bands[band].status))) {
+      !PREPARATION_BANDS.every(band => allowed.includes(payload.bands[band]?.status))) {
     throw new PatchDataError('invalid_response', 'The detector preparation response is incomplete.');
   }
   return payload;
@@ -458,6 +459,86 @@ export async function prepareRealBands({ ra, dec, band = 4, from = '', to = '', 
 export function preparedBandPatch(entry, { target, band, queryRange }) {
   if (!entry || !['ready', 'partial'].includes(entry.status) || !entry.manifest) return null;
   const patch = normalizeSequencePatch(entry.manifest, target, band, queryRange, 20);
+  return patch.status === 'ok' ? patch : null;
+}
+
+async function flipbookRequest(path, { signal, body, fetchImpl = fetch, requestBand = false } = {}) {
+  let response;
+  try {
+    response = await fetchImpl(path, {
+      method: body || requestBand ? 'POST' : 'GET', signal, cache: 'no-store',
+      headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error;
+    throw new PatchDataError('backend_unavailable', 'Could not reach the SPHEREx frame service.', error);
+  }
+  if (!response.ok) {
+    let message = '';
+    try {
+      const failure = await response.json();
+      message = failure?.detail || failure?.message;
+    } catch { /* A proxy can return HTML instead of JSON. */ }
+    const code = response.status === 404 ? 'flipbook_unavailable'
+      : response.status === 502 && /IRSA|archive|SPHEREx image search/i.test(message) ? 'archive_unavailable'
+      : 'backend_unavailable';
+    throw new PatchDataError(code, typeof message === 'string' && message ||
+      `The SPHEREx frame service returned HTTP ${response.status}.`);
+  }
+  try {
+    const payload = await response.json();
+    const jobId = path.match(/^\/api\/flipbook\/([a-f0-9]{32})(?:\/|$)/)?.[1] || payload?.job_id;
+    return preparationPayload(payload, validatedFlipbookId(jobId), { progressive: true });
+  } catch (error) {
+    if (error instanceof PatchDataError) throw error;
+    throw new PatchDataError('invalid_response', 'Could not read the SPHEREx frame status.', error);
+  }
+}
+
+function validatedFlipbookId(jobId) {
+  if (!/^[a-f0-9]{32}$/.test(jobId || '')) {
+    throw new PatchDataError('invalid_response', 'The SPHEREx frame service did not return a valid job ID.');
+  }
+  return jobId;
+}
+
+function detectorNumber(band) {
+  if (band === 'all') return band;
+  if (!Number.isInteger(band) || band < 1 || band > 6) {
+    throw new PatchDataError('invalid_request', 'Choose a detector band from 1 through 6.');
+  }
+  return `D${band}`;
+}
+
+export async function startFlipbook({ ra, dec, band = 4, from = '', to = '', refresh = false, signal, fetchImpl = fetch }) {
+  const target = parseCoordinates(ra, dec);
+  if (!target.isValid) throw new PatchDataError('invalid_request', target.raError || target.decError);
+  const [start, end] = orderedRange(from || MISSION_START, to || new Date().toISOString().slice(0, 10));
+  const body = { ra_deg: target.raDeg, dec_deg: target.decDeg, start_date: start, end_date: end, band: detectorNumber(band) };
+  const payload = await flipbookRequest(`/api/flipbook${refresh ? '?refresh=1' : ''}`, { body, signal, fetchImpl });
+  return { payload, target, queryRange: { from: start, to: end } };
+}
+
+export function readFlipbook(jobId, { signal, fetchImpl = fetch } = {}) {
+  return flipbookRequest(`/api/flipbook/${validatedFlipbookId(jobId)}`, { signal, fetchImpl });
+}
+
+export function requestFlipbookBand(jobId, band, { refresh = false, signal, fetchImpl = fetch } = {}) {
+  const path = `/api/flipbook/${validatedFlipbookId(jobId)}/band/${detectorNumber(band)}`;
+  return flipbookRequest(`${path}${refresh ? '?refresh=1' : ''}`, { signal, fetchImpl, requestBand: true });
+}
+
+export function waitForFlipbookUpdate(signal) {
+  return waitForAvailableBuild(650, signal);
+}
+
+export function flipbookBandPatch(entry, { target, band, queryRange }) {
+  if (!entry?.manifest || !['running', 'ready', 'partial'].includes(entry.status)) return null;
+  // The flipbook worker verifies both input and aligned target coverage when
+  // publishing every frame, including ones with missing wavelength metadata.
+  const patch = normalizeSequencePatch(entry.manifest, target, band, queryRange, 20,
+    { preserveSelectedFrames: true });
   return patch.status === 'ok' ? patch : null;
 }
 

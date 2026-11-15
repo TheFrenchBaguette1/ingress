@@ -1,14 +1,34 @@
-import { parseCoordinates, fetchZoomedRealPatch, restoreRealSequence, loadBundledRealPatch, prepareRealBands, preparedBandPatch } from './data.js';
+import {
+  parseCoordinates, fetchZoomedRealPatch, restoreRealSequence, loadBundledRealPatch,
+  prepareRealBands, preparedBandPatch, startFlipbook, readFlipbook, requestFlipbookBand,
+  waitForFlipbookUpdate, flipbookBandPatch,
+} from './data.js';
 import { homeStory, heroArt, heroOrnaments } from './story.js';
 
 const app = document.querySelector('#app');
 const staticPreview = document.querySelector('meta[name="ingress-static-preview"]')?.getAttribute?.('content') === 'true';
+const liveFlipbook = !staticPreview &&
+  document.querySelector('meta[name="ingress-live-flipbook"]')?.getAttribute?.('content') === 'true';
 const fullViewerUrl = 'https://ideal-train-jjgp96g4g46rfqgwv-5173.app.github.dev/';
 const params = new URLSearchParams(location.search);
 const DEFAULT_FOV = 5;
+const ALL_WAVELENGTHS = Object.freeze({ number: 'all', rangeUm: [0.744, 5.002], color: '#e2c54a' });
+function bandFromQuery(query) {
+  const number = Number(query.get('band'));
+  if (Number.isInteger(number) && number >= 1 && number <= 6) return number;
+  return liveFlipbook && !query.get('sequence') ? 'all' : 4;
+}
+const PLAYBACK_RATES = [1, 2, 4, 6, 8, 12, 16, 20];
+const PLAYBACK_LOOKAHEAD = 8;
+const frameDateFormat = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'UTC', day: 'numeric', month: 'short', year: 'numeric',
+});
+const frameMonthFormat = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'UTC', month: 'short', year: 'numeric',
+});
 function fovFromQuery(query) {
   const value = Number(query.get('fov'));
-  if (Number.isInteger(value) && value >= 3 && value <= 20) return value;
+  if (Number.isInteger(value) && value >= 1 && value <= 20) return value;
   // Earlier shared coordinate links omitted fov and displayed a 10′ field.
   return query.get('ra') && query.get('dec') ? 10 : DEFAULT_FOV;
 }
@@ -19,11 +39,11 @@ const state = {
   from: validDate(params.get('from')) ? params.get('from') : '',
   to: validDate(params.get('to')) ? params.get('to') : '',
   fov: initialFov,
-  customFov: ![5, 10, 20].includes(initialFov) && initialFov >= 3 && initialFov <= 20,
-  band: Number(params.get('band')) || 4, activeDateId: params.get('date') || '',
+  customFov: ![5, 10, 20].includes(initialFov),
+  band: bandFromQuery(params), activeDateId: params.get('date') || '',
   patch: null, error: null, raError: '', decError: '', dateError: '',
   headerRa: null, headerDec: null,
-  playing: false, drawer: '', aboutOpen: false, request: null, imageError: false,
+  playing: false, playbackRate: 6, drawer: '', aboutOpen: false, request: null, imageError: false,
   zoomRequest: null, zoomError: null,
   linkedSequenceId: /^[a-f0-9]{32}$/.test(params.get('sequence') || '') ? params.get('sequence') : null,
   prepared: null,
@@ -31,12 +51,18 @@ const state = {
   sampleFallback: null,
 };
 let playbackTimer = null;
+let renderedFrames = [];
+const playbackImages = new Map();
 let loadSequence = 0;
 let restoreDrawerAction = null;
 const realCache = new Map();
 const preparedImageCache = new Map();
 const retiredPreviewUrls = new Set();
 let lastRealView = null;
+let activeFlipbook = null;
+
+const ACTIVE_BAND_STATUSES = new Set(['queued', 'running']);
+const FLIPBOOK_IMAGE_WORKERS = 8;
 
 function prunePreparedImages() {
   const keep = new Set();
@@ -55,6 +81,7 @@ function prunePreparedImages() {
       if (frame.previewUrl) keepBlobs.add(frame.previewUrl);
     }
   }
+  for (const url of activeFlipbook?.previews.keys() || []) keep.add(url);
   for (const url of retiredPreviewUrls) {
     if (!keepBlobs.has(url)) {
       URL.revokeObjectURL(url);
@@ -81,18 +108,20 @@ function rangeLabel(band) { return band?.rangeUm?.map(n => Number(n).toFixed(3))
 function displayDate(iso) {
   const date = new Date(`${String(iso).slice(0, 10)}T12:00:00Z`);
   return Number.isNaN(date.getTime()) ? String(iso).slice(0, 10) :
-    new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', day: 'numeric', month: 'short', year: 'numeric' }).format(date);
+    frameDateFormat.format(date);
 }
 function displayMonth(iso) {
   const date = new Date(`${String(iso).slice(0, 10)}T12:00:00Z`);
-  return new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', month: 'short', year: 'numeric' }).format(date);
+  return frameMonthFormat.format(date);
 }
 function bandColor(band) { return band?.color || '#e2c54a'; }
-function selectedBand() { return state.patch?.bands.find(b => b.number === state.band); }
+function selectedBand() {
+  return state.band === 'all' ? ALL_WAVELENGTHS : state.patch?.bands.find(b => b.number === state.band);
+}
 function allBandFrames() {
   if (!state.patch) return [];
   const order = new Map(state.patch.dates.map((d, i) => [d.id, i]));
-  return state.patch.frames.filter(f => f.band === state.band)
+  return state.patch.frames.filter(f => state.band === 'all' || f.band === state.band)
     .sort((a, b) => (order.get(a.dateId) ?? 0) - (order.get(b.dateId) ?? 0));
 }
 function inRange(dateId) {
@@ -202,7 +231,7 @@ function frameAudit(patch, frame, fov) {
     wcs_header_of_loaded_grid: patch.grid?.wcsHeader || null,
     loaded_raster_dimensions: { width: patch.grid?.widthPixels, height: patch.grid?.heightPixels },
     loaded_raster_fov_arcmin: patch.baseFovArcmin,
-    brightness_scale: patch.display,
+    brightness_scale: patch.displayByBand?.[frame?.band] || patch.display,
     image_url: frame?.imageUrl || null,
     timeline_product_ids: patch.frames.map(item => item.productId),
   };
@@ -223,29 +252,106 @@ function settleFrame() {
   state.imageError = false;
   if (!frame) stopPlayback();
 }
-function stopPlayback() {
+function stopPlayback({ keepImages = false } = {}) {
   if (playbackTimer) clearInterval(playbackTimer);
   playbackTimer = null;
   state.playing = false;
+  if (!keepImages) playbackImages.clear();
 }
-function stepFrame(direction) {
-  const frames = visibleFrames();
-  if (!frames.length) return;
-  const index = Math.max(0, frames.findIndex(f => f.dateId === state.activeDateId));
-  state.activeDateId = frames[(index + direction + frames.length) % frames.length].dateId;
+function warmPlaybackWindow(start = Math.max(0, renderedFrames.findIndex(frame => frame.dateId === state.activeDateId))) {
+  if (typeof Image !== 'function' || !renderedFrames.length) return;
+  const upcoming = Array.from({ length: Math.min(PLAYBACK_LOOKAHEAD, renderedFrames.length) },
+    (_, offset) => renderedFrames[(start + offset + 1) % renderedFrames.length]);
+  const keep = new Set(upcoming.map(frame => frame.previewUrl || frame.imageUrl));
+  for (const src of playbackImages.keys()) {
+    if (!keep.has(src)) playbackImages.delete(src);
+  }
+  for (const src of keep) {
+    if (playbackImages.has(src)) continue;
+    const image = new Image();
+    const entry = { image, ready: false };
+    playbackImages.set(src, entry);
+    image.src = src;
+    // Allow the normal image error UI if a preview could not be decoded.
+    image.decode().catch(() => {}).finally(() => { entry.ready = true; });
+  }
+}
+function updatePlaybackButton() {
+  const button = app.querySelector('[data-action="play"]');
+  if (!button) return false;
+  button.textContent = state.playing ? '❚❚ Pause' : '▶ Play';
+  button.setAttribute('aria-label', state.playing ? 'Pause timeline' : 'Play timeline');
+  return true;
+}
+function updateFrameDetails(frame = currentFrame()) {
+  app.querySelectorAll('[data-frame-details]').forEach(body => {
+    const details = body.closest('details');
+    details.querySelector('[data-frame-notes]').textContent = frameNoteCount(frame);
+    if (details.open) body.innerHTML = frameDetailsBody(frame, selectedBand());
+  });
+}
+function paintFrame(frame, index) {
+  const image = app.querySelector('[data-frame-image]');
+  if (!image) return false;
+  const band = selectedBand();
+  const presentation = framePresentation(frame, band, index, renderedFrames.length);
+  image.alt = presentation.imageAlt;
+  image.src = frame.previewUrl || frame.imageUrl;
+  app.querySelector('.image-view').setAttribute('aria-label', presentation.imageLabel);
+  app.querySelector('.frame-date').textContent = presentation.dateLabel;
+  app.querySelector('.frame-ordinal').textContent = presentation.ordinal;
+  app.querySelector('[data-frame-wavelength]').textContent = presentation.wavelength;
+  app.querySelector('.wavelength-chip')?.style.setProperty('--band-color', presentation.color);
+  const coverage = app.querySelector('[data-frame-coverage]');
+  const coverageContent = frameCoverage(frame);
+  if (coverage.innerHTML !== coverageContent) coverage.innerHTML = coverageContent;
+
+  const scrubber = app.querySelector('[data-range="frame"]');
+  scrubber.value = index + 1;
+  scrubber.setAttribute('aria-valuetext', presentation.scrubberLabel);
+  const previous = app.querySelector('.date-dot[aria-current="true"]');
+  const next = app.querySelector(`.date-dot[data-date="${CSS.escape(frame.dateId)}"]`);
+  previous?.classList.remove('selected');
+  previous?.setAttribute('aria-current', 'false');
+  next?.classList.add('selected');
+  next?.setAttribute('aria-current', 'true');
+  updatePlaybackButton();
+  updateFrameDetails(frame);
+  return true;
+}
+function selectFrame(index, { share = true } = {}) {
+  const frame = renderedFrames[index];
+  if (!frame) return;
+  state.activeDateId = frame.dateId;
   state.imageError = false;
-  syncUrl(); render();
+  if (share) syncUrl();
+  if (!paintFrame(frame, index)) render();
+}
+function stepFrame(direction, { playing = false } = {}) {
+  if (!renderedFrames.length) return;
+  const index = Math.max(0, renderedFrames.findIndex(frame => frame.dateId === state.activeDateId));
+  const next = (index + direction + renderedFrames.length) % renderedFrames.length;
+  if (playing) {
+    warmPlaybackWindow(index);
+    const frame = renderedFrames[next];
+    const image = playbackImages.get(frame.previewUrl || frame.imageUrl);
+    if (image && !image.ready) return;
+  }
+  selectFrame(next, { share: !playing });
 }
 function setPlayback(on) {
-  stopPlayback();
-  if (on && visibleFrames().length > 1) {
+  stopPlayback({ keepImages: on });
+  if (on && renderedFrames.length > 1) {
     state.playing = true;
+    warmPlaybackWindow();
     playbackTimer = setInterval(() => {
       if (document.hidden) return;
-      stepFrame(1);
-    }, 900);
+      stepFrame(1, { playing: true });
+    }, 1000 / state.playbackRate);
+  } else {
+    syncUrl();
   }
-  render();
+  if (!updatePlaybackButton()) render();
 }
 function syncUrl() {
   const url = new URL(location.href);
@@ -320,6 +426,16 @@ function statusCard(kind) {
       return `<main class="state-main"><div class="state-card" role="status"><h1>Opening saved SPHEREx observations</h1>
         <p>RA ${esc(request.ra)} · Dec ${esc(request.dec)} · Band 4</p>${staticPreview ? '' : '<button type="button" class="pill-button" data-action="cancel">Cancel</button>'}</div></main>`;
     }
+    if (request.flipbook) {
+      const number = request.flipbook.wantedBand ?? state.band;
+      const info = flipbookEntry(request.flipbook, number);
+      return `<main class="state-main"><div class="state-card" role="status" aria-live="polite">
+        <h1>${number === 'all' ? 'Opening observations across all wavelengths' : `Opening Band ${esc(number)} observations`}</h1>
+        <p>RA ${esc(request.ra)} · Dec ${esc(request.dec)}</p>
+        <p>${info?.candidate_count == null ? 'Finding available SPHEREx exposures…' : `Preparing images from ${esc(info.candidate_count)} candidate exposures. Playback opens as soon as the first images arrive.`}</p>
+        <div class="progress-bar" aria-hidden="true"><span></span></div>
+        <button type="button" class="pill-button" data-action="cancel">Cancel</button></div></main>`;
+    }
     const progress = state.request?.preparationProgress;
     const rows = progress?.bands ? Object.entries(progress.bands).map(([band, entry]) =>
       `<li>${esc(band)} · ${esc(entry.status === 'ready' || entry.status === 'partial' ? 'real frames ready' :
@@ -332,12 +448,13 @@ function statusCard(kind) {
   }
   if (kind === 'band-unavailable') {
     const available = [...(state.prepared?.patches || new Map())].sort(([a], [b]) => a - b);
-    const status = state.prepared?.bands?.[`D${state.band}`]?.status;
-    return `<main class="state-main"><div class="state-card" role="alert"><span class="state-icon">⚠</span><h1>${status === 'empty' ? `No loaded Band ${esc(state.band)} frames` : `Band ${esc(state.band)} is unavailable`}</h1>
+    const status = flipbookEntry(state.prepared, state.band)?.status;
+    const name = esc(bandName(state.band));
+    return `<main class="state-main"><div class="state-card" role="alert"><span class="state-icon">⚠</span><h1>${status === 'empty' ? `No loaded frames for ${name}` : `${name} is unavailable`}</h1>
       <p>${esc(state.error?.message || 'No verified images were prepared for this detector.')}</p>
-      <p>No other detector has been relabeled as Band ${esc(state.band)}.</p>
-      ${available.length ? `<p>These other detector bands have verified real frames ready:</p><div class="actions">${available.map(([band, patch]) => `<button type="button" class="pill-button" data-action="view-prepared-band" data-band="${band}">View Band ${band} · ${patch.frames.length} frame${patch.frames.length === 1 ? '' : 's'}</button>`).join('')}</div>` : '<p>No verified detector frames are ready for this patch yet.</p>'}
-      <div class="actions"><button type="button" class="primary-button" data-action="retry-preparation">Recheck missing bands</button><button type="button" class="pill-button" data-action="home">Change coordinates</button></div></div></main>`;
+      ${state.prepared?.live ? `<div class="actions">${['all', 1, 2, 3, 4, 5, 6].filter(band => band !== state.band).map(band => `<button type="button" class="pill-button" data-action="band" data-band="${band}">Try ${esc(bandName(band))}</button>`).join('')}</div>`
+      : available.length ? `<p>These other detector bands have verified real frames ready:</p><div class="actions">${available.map(([band, patch]) => `<button type="button" class="pill-button" data-action="view-prepared-band" data-band="${band}">View Band ${band} · ${patch.frames.length} frame${patch.frames.length === 1 ? '' : 's'}</button>`).join('')}</div>` : '<p>No verified detector frames are ready for this patch yet.</p>'}
+      <div class="actions"><button type="button" class="primary-button" data-action="retry-preparation">${state.prepared?.live ? 'Retry requested band' : 'Recheck missing bands'}</button><button type="button" class="pill-button" data-action="home">Change coordinates</button>${state.prepared?.live ? '<button class="pill-button" data-action="saved-real">View saved SPHEREx observations</button>' : ''}</div></div></main>`;
   }
   if (kind === 'empty') {
     const readyBands = [...(state.prepared?.patches || new Map())]
@@ -360,27 +477,48 @@ function statusCard(kind) {
     <div class="actions"><button class="primary-button" data-action="retry">Try again</button><button class="pill-button" data-action="home">Change coordinates</button><button class="pill-button" data-action="saved-real">View saved real observations at RA 180°, Dec −30° (5′)</button>${lastRealView ? '<button class="pill-button" data-action="return-real">Return to last real view</button>' : ''}</div>
     <details><summary>Technical details</summary><p>${esc(state.error?.code || 'request_failed')}</p></details></div></main>`;
 }
+function framePresentation(frame, band, index, count) {
+  const detector = state.patch.bands.find(item => item.number === frame.band) || band;
+  const number = frame.band ?? detector?.number;
+  const dateLabel = displayDate(frame.dateId);
+  const time = state.patch.dates.find(date => date.id === frame.dateId)?.timeUtc;
+  const ordinal = `Frame ${index + 1} of ${count}${time ? ` · ${time} UTC` : ''}`;
+  const wavelength = frame.wavelengthUm == null ? 'Wavelength unavailable'
+    : `≈${Number(frame.wavelengthUm).toFixed(2)} µm at target`;
+  return {
+    dateLabel, ordinal,
+    color: bandColor(detector),
+    imageAlt: `SPHEREx sky patch image, band ${number}, ${dateLabel}`,
+    imageLabel: `SPHEREx observation at ${dateLabel}`,
+    wavelength: `${wavelength} · Band ${number}`,
+    scrubberLabel: `Frame ${index + 1} of ${count}, ${dateLabel}${time ? `, ${time} UTC` : ''}, Band ${number}`,
+  };
+}
+function frameCoverage(frame) {
+  const patch = state.patch;
+  const coverageNote = frame.flags?.find(flag => flag.code === 'partial_coverage');
+  const outerNote = frame.flags?.find(flag => flag.code === 'zoom_outer_unavailable');
+  return `${coverageNote ? `<p class="coverage-note">${state.fov < (patch.baseFovArcmin || state.fov)
+    ? `The loaded ${esc(patch.baseFovArcmin)}′ master image has ${esc(Math.round((frame.coverageFraction || 0) * 100))}% valid pixels; coverage in this cropped ${esc(state.fov)}′ region can differ.`
+    : esc(coverageNote.label)} Missing pixels are transparent.</p>` : ''}
+    ${outerNote ? `<p class="coverage-note" role="status">${esc(outerNote.label)}</p>` : ''}`;
+}
 function imageStage(frame, band, index, frames) {
   const patch = state.patch;
-  const date = patch.dates.find(d => d.id === frame.dateId);
+  const presentation = framePresentation(frame, band, index, frames.length);
   // Crop the same raster around its WCS center. Neither the exposure list nor
   // any science pixel, missing-data alpha, or brightness scale changes here.
   const zoom = Math.max(1, (patch.baseFovArcmin || state.fov) / state.fov);
   const pixelScale = patch.pixelScaleArcsec;
   const scaleLength = state.fov >= 12 ? 5 : state.fov >= 6 ? 2 : 1;
-  const coverageNote = frame.flags?.find(flag => flag.code === 'partial_coverage');
-  const outerNote = frame.flags?.find(flag => flag.code === 'zoom_outer_unavailable');
-  return `<div class="stage-top"><div><span class="frame-date">${esc(displayDate(frame.dateId))}</span><span class="frame-ordinal">Frame ${index + 1} of ${frames.length} · ${esc(date?.timeUtc || '')} UTC</span></div>
-    <span class="wavelength-chip" style="--band-color:${bandColor(band)}"><i class="color-chip"></i>${frame.wavelengthUm == null ? 'Wavelength unavailable' : '≈' + esc(Number(frame.wavelengthUm).toFixed(2)) + ' µm at target'} · Band ${band.number}</span></div>
-    <div class="image-view" aria-label="SPHEREx observation at ${esc(displayDate(frame.dateId))}">
-      <div class="image-layer" style="--zoom:${zoom}"><img data-frame-image src="${esc(frame.previewUrl || frame.imageUrl)}" alt="SPHEREx sky patch image, band ${band.number}, ${esc(displayDate(frame.dateId))}" /></div><div class="crosshair" title="Entered coordinates"></div>
+  return `<div class="stage-top"><div><span class="frame-date">${esc(presentation.dateLabel)}</span><span class="frame-ordinal">${esc(presentation.ordinal)}</span></div>
+    <span class="wavelength-chip" style="--band-color:${presentation.color}"><i class="color-chip"></i><span data-frame-wavelength>${esc(presentation.wavelength)}</span></span></div>
+    <div class="image-view" aria-label="${esc(presentation.imageLabel)}">
+      <div class="image-layer" style="--zoom:${zoom}"><img data-frame-image src="${esc(frame.previewUrl || frame.imageUrl)}" alt="${esc(presentation.imageAlt)}" /></div><div class="crosshair" title="Entered coordinates"></div>
       <div class="compass"><span>N</span><span>↑</span><span>E ←</span></div>
       ${pixelScale ? `<div class="scale-bar" style="--scale-width:${(scaleLength / state.fov * 100).toFixed(1)}%">${scaleLength}′</div>` : ''}<div class="fov-label">${state.fov}′ wide</div>
     </div><div class="image-caption"><span>Crosshair marks the entered coordinates${pixelScale ? ` · 1 science pixel ≈ ${esc(pixelScale)}″ · display zoom uses nearest-neighbor resampling` : ''}</span><a href="#frame-details-desktop" data-action="show-details">Source and details</a></div>
-    ${coverageNote ? `<p class="coverage-note">${state.fov < (patch.baseFovArcmin || state.fov)
-    ? `The loaded ${esc(patch.baseFovArcmin)}′ master image has ${esc(Math.round((frame.coverageFraction || 0) * 100))}% valid pixels; coverage in this cropped ${esc(state.fov)}′ region can differ.`
-    : esc(coverageNote.label)} Missing pixels are transparent.</p>` : ''}
-    ${outerNote ? `<p class="coverage-note" role="status">${esc(outerNote.label)}</p>` : ''}`;
+    <div data-frame-coverage>${frameCoverage(frame)}</div>`;
 }
 function wavelengthComparisonNote(frames) {
   if (frames.length < 2) return '';
@@ -392,9 +530,14 @@ function wavelengthComparisonNote(frames) {
   return `<p class="wavelength-caution">These frames span approximately ${first.toFixed(2)}–${last.toFixed(2)} µm at the target. Brightness changes may reflect different wavelengths; compare positions separately.</p>`;
 }
 function timeline(frames, band) {
+  renderedFrames = frames;
   const patch = state.patch;
   const all = allBandFrames();
   const curr = currentFrame();
+  const index = Math.max(0, frames.indexOf(curr));
+  const scrubberLabel = curr ? framePresentation(curr, band, index, frames.length).scrubberLabel : 'No loaded frames';
+  const compact = patch.dates.length > 14;
+  const wavelengthScope = band.number === 'all' ? 'across all wavelengths' : `at ${rangeLabel(band)}`;
   const lookup = new Map(all.map(f => [f.dateId, f]));
   const dayCounts = new Map();
   const sampled = Number.isInteger(patch.candidateCount) && Number.isInteger(patch.attemptedCount)
@@ -405,7 +548,7 @@ function timeline(frames, band) {
     dayCounts.set(day, (dayCounts.get(day) || 0) + 1);
   }
   let lastMonth = '';
-  const dots = patch.dates.map(date => {
+  const dots = compact ? '' : patch.dates.map(date => {
     const month = displayMonth(date.id);
     const showMonth = month !== lastMonth;
     lastMonth = month;
@@ -414,41 +557,39 @@ function timeline(frames, band) {
     const frameNote = frame?.flags?.some(flag => !['quality_unchecked', 'partial_sequence'].includes(flag.code));
     const cls = `${!frame ? 'missing' : ''} ${frameNote ? 'flagged' : ''} ${curr?.dateId === date.id ? 'selected' : ''} ${!inside ? 'outside' : ''}`;
     const repeated = dayCounts.get(date.id.slice(0, 10)) > 1;
-    return `<button type="button" class="date-dot ${cls}" data-action="date" data-date="${esc(date.id)}" ${!frame || !inside ? 'disabled' : ''} aria-label="${esc(displayDate(date.id))}, ${esc(date.timeUtc)} UTC, ${frame ? `image in band ${state.band}` : `no image in band ${state.band}`}${inside ? '' : ', outside date filter'}" aria-current="${curr?.dateId === date.id ? 'true' : 'false'}"><i aria-hidden="true"></i>${esc(date.id.slice(8, 10).replace(/^0/, ''))}<span class="month">${repeated ? esc(date.timeUtc) : showMonth ? esc(month) : '&nbsp;'}</span></button>`;
+    return `<button type="button" class="date-dot ${cls}" data-action="date" data-date="${esc(date.id)}" ${!frame || !inside ? 'disabled' : ''} aria-label="${esc(displayDate(date.id))}, ${esc(date.timeUtc)} UTC, ${frame ? `image in band ${frame.band}` : 'no loaded frame'}${inside ? '' : ', outside date filter'}" aria-current="${curr?.dateId === date.id ? 'true' : 'false'}"><i aria-hidden="true"></i>${esc(date.id.slice(8, 10).replace(/^0/, ''))}<span class="month">${repeated ? esc(date.timeUtc) : showMonth ? esc(month) : '&nbsp;'}</span></button>`;
   }).join('');
   return `<section class="timeline-card" aria-label="Observation timeline"><div class="timeline-head"><span class="timeline-title">◷ &nbsp; Time · observation dates</span>
       <div class="timeline-range"><label for="range-from">From</label><input class="date-input" id="range-from" data-range="from" type="date" value="${esc(state.from)}" min="2025-05-01" max="${new Date().toISOString().slice(0, 10)}" aria-label="Earliest UTC date">
       <label for="range-to">to</label><input class="date-input" id="range-to" data-range="to" type="date" value="${esc(state.to)}" min="2025-05-01" max="${new Date().toISOString().slice(0, 10)}" aria-label="Latest UTC date">
       <button type="button" class="pill-button" data-action="clear-range" ${!state.from && !state.to ? 'disabled' : ''}>All dates</button></div></div>
-      <div class="timeline-summary ${frames.length ? '' : 'empty'}">${frames.length ? `Showing ${frames.length} of ${all.length} loaded frames at ${esc(rangeLabel(band))}${sampled}` : `No loaded frames at ${esc(rangeLabel(band))} in this date range.`}</div>
+      <div class="timeline-summary ${frames.length ? '' : 'empty'}">${frames.length ? `Showing ${frames.length} of ${all.length} loaded frames ${esc(wavelengthScope)}${sampled}` : `No loaded frames ${esc(wavelengthScope)} in this date range.`}</div>
       ${wavelengthComparisonNote(frames)}
       <div class="timeline-content"><div class="playback"><button type="button" class="soft-button" data-action="prev" ${frames.length < 2 ? 'disabled' : ''} aria-label="Previous frame">Ⅰ◀</button>
       <button type="button" class="primary-button" data-action="play" ${frames.length < 2 ? 'disabled' : ''} aria-label="${state.playing ? 'Pause' : 'Play'} timeline">${state.playing ? '❚❚ Pause' : '▶ Play'}</button>
-      <button type="button" class="soft-button" data-action="next" ${frames.length < 2 ? 'disabled' : ''} aria-label="Next frame">▶Ⅰ</button></div>
-      <div class="dots-wrap"><div class="date-dots">${dots}</div></div></div>
-      <div class="legend"><span><i></i> image in this wavelength</span><span><i class="flag"></i> frame note</span></div>
+      <button type="button" class="soft-button" data-action="next" ${frames.length < 2 ? 'disabled' : ''} aria-label="Next frame">▶Ⅰ</button>
+      <label class="playback-rate">Speed <select data-range="playback-rate" aria-label="Playback speed" ${frames.length < 2 ? 'disabled' : ''}>
+        ${PLAYBACK_RATES.map(rate => `<option value="${rate}" ${rate === state.playbackRate ? 'selected' : ''}>${rate} fps</option>`).join('')}
+      </select></label></div>
+      <div class="timeline-scrub">
+        <input data-range="frame" type="range" min="1" max="${Math.max(1, frames.length)}" value="${index + 1}" step="1"
+          aria-label="Observation frame" aria-valuetext="${esc(scrubberLabel)}" ${frames.length < 2 ? 'disabled' : ''} />
+        ${compact && frames.length > 1 ? `<div class="timeline-endpoints"><span>${esc(displayDate(frames[0].dateId))}</span><span>${esc(displayDate(frames.at(-1).dateId))}</span></div>` : ''}
+      </div></div>
+      ${dots ? `<div class="dots-wrap"><div class="date-dots">${dots}</div></div>
+      <div class="legend"><span><i></i> observation</span><span><i class="flag"></i> frame note</span></div>` : ''}
     </section>`;
 }
-function settingsPanel(section = 'all', scope = 'desktop') {
+function frameNoteCount(frame) {
+  return frame?.flags.length ? `${frame.flags.length} note(s)` : 'No notes';
+}
+function frameDetailsBody(frame, band) {
+  if (!frame) return '<p class="notice">No frame in this wavelength and date range.</p>';
   const patch = state.patch;
-  const band = selectedBand();
-  const frame = currentFrame();
-  const maxFov = Math.min(20, patch.fovMaxArcmin || 20);
-  const datesInBand = n => patch.frames.filter(f => f.band === n && inRange(f.dateId)).length;
-  const bands = patch.bands.map(b => {
-    const prepared = state.prepared?.patches.get(b.number);
-    const entry = state.prepared?.bands[`D${b.number}`];
-    const count = prepared ? prepared.frames.filter(frame => inRange(frame.dateId)).length : datesInBand(b.number);
-    const available = b.number === state.band || !!prepared;
-    const label = !available ? entry?.status === 'empty' ? 'No frames' :
-      entry?.status === 'queued' || entry?.status === 'running' ? 'Not ready' : 'Unavailable'
-      : `${count} frame${count === 1 ? '' : 's'}`;
-    return `<button type="button" class="band-option ${state.band === b.number ? 'active' : ''}" style="--band-color:${bandColor(b)}" data-action="band" data-band="${b.number}" aria-pressed="${state.band === b.number}" ${available ? '' : 'disabled'}><i class="color-chip" aria-hidden="true"></i> <strong>${esc(rangeLabel(b))}</strong><small>Band ${b.number}</small><span class="band-count">${label}</span></button>`;
-  }).join('');
-  const fovs = [20,10,5].map(n => `<button class="pill-button ${state.fov === n && !state.customFov ? 'active' : ''}" type="button" data-action="fov" data-fov="${n}" aria-pressed="${state.fov === n && !state.customFov}" ${n > maxFov ? 'disabled' : ''}>${{20:'Wide',10:'Medium',5:'Close'}[n]} ${n}′</button>`).join('');
-  const detail = `<details class="about" id="frame-details-${scope}" ${state.aboutOpen || section === 'details' ? 'open' : ''}><summary>About this frame <span>${frame?.flags.length ? `${frame.flags.length} note(s)` : 'No notes'}</span></summary>
-    ${frame ? `<dl><div><dt>Date (UTC)</dt><dd>${esc(displayDate(frame.dateId))} ${esc(patch.dates.find(d => d.id === frame.dateId)?.timeUtc || '')}</dd></div>
-      <div><dt>Wavelength range</dt><dd>${esc(rangeLabel(band))} · Band ${band.number}</dd></div><div><dt>At target (approx.)</dt><dd>${frame.wavelengthUm == null ? 'Not provided' : `${esc(Number(frame.wavelengthUm).toFixed(2))} µm`}</dd></div>
+  const detector = patch.bands.find(item => item.number === frame.band) || band;
+  const display = patch.displayByBand?.[frame.band] || patch.display;
+  return `<dl><div><dt>Date (UTC)</dt><dd>${esc(displayDate(frame.dateId))} ${esc(patch.dates.find(d => d.id === frame.dateId)?.timeUtc || '')}</dd></div>
+      <div><dt>Wavelength range</dt><dd>${esc(rangeLabel(detector))} · Band ${frame.band ?? detector?.number}</dd></div><div><dt>At target (approx.)</dt><dd>${frame.wavelengthUm == null ? 'Not provided' : `${esc(Number(frame.wavelengthUm).toFixed(2))} µm`}</dd></div>
       <div><dt>Field of view</dt><dd>${state.fov}′ wide</dd></div><div><dt>Orientation</dt><dd>${esc(patch.orientation)}</dd></div>
       <div><dt>Data notes</dt><dd>${frame.flags.length ? frame.flags.map(f =>
         f.code === 'partial_coverage' && state.fov < (patch.baseFovArcmin || state.fov)
@@ -460,15 +601,40 @@ function settingsPanel(section = 'all', scope = 'desktop') {
         <div><dt>Exact wavelength</dt><dd>${frame.wavelengthUm == null ? 'Not provided' : `${esc(frame.wavelengthUm)} µm at target`}</dd></div>
         <div><dt>Displayed pixels</dt><dd>${esc(displayedDimensions(patch, state.fov).width)} × ${esc(displayedDimensions(patch, state.fov).height)} aligned science pixels</dd></div>
         <div><dt>Sky footprint</dt><dd class="mono">${(state.fov === patch.baseFovArcmin && patch.grid?.skyFootprint || skyFootprint(patch.target, state.fov)).map(p => `${esc(p.ra_deg)}°, ${esc(p.dec_deg)}°`).join(' · ')}</dd></div>
-        <div><dt>Brightness scale</dt><dd>${patch.display ? `${esc(patch.display.stretch)}; ${esc(patch.display.vmin)} to ${esc(patch.display.vmax)} ${esc(patch.display.brightness_unit || '')}` : 'Not provided'}</dd></div>
-        <div><dt>Pipeline</dt><dd>${esc(frame.pipelineVersion || 'Not provided')}</dd></div>${patch.releaseDate ? `<div><dt>Release date</dt><dd>${esc(patch.releaseDate)}</dd></div>` : ''}<div><dt>Archive</dt><dd>${frame.archiveUrl ? `<a target="_blank" rel="noopener noreferrer" href="${esc(frame.archiveUrl)}">Open IRSA cutout ↗</a>` : 'Not provided'}</dd></div></dl>${patch.warnings?.length ? `<p class="notice">${patch.warnings.map(esc).join(' ')}</p>` : ''}` : '<p class="notice">No frame in this wavelength and date range.</p>'}</details>`;
+        <div><dt>Brightness scale</dt><dd>${display ? `${esc(display.stretch)}; ${esc(display.vmin)} to ${esc(display.vmax)} ${esc(display.brightness_unit || '')}` : 'Not provided'}</dd></div>
+        <div><dt>Pipeline</dt><dd>${esc(frame.pipelineVersion || 'Not provided')}</dd></div>${patch.releaseDate ? `<div><dt>Release date</dt><dd>${esc(patch.releaseDate)}</dd></div>` : ''}<div><dt>Archive</dt><dd>${frame.archiveUrl ? `<a target="_blank" rel="noopener noreferrer" href="${esc(frame.archiveUrl)}">Open IRSA cutout ↗</a>` : 'Not provided'}</dd></div></dl>${patch.warnings?.length ? `<p class="notice">${patch.warnings.map(esc).join(' ')}</p>` : ''}`;
+}
+function settingsPanel(section = 'all', scope = 'desktop') {
+  const patch = state.patch;
+  const band = selectedBand();
+  const frame = currentFrame();
+  const maxFov = Math.min(20, patch.fovMaxArcmin || 20);
+  const datesInBand = n => patch.frames.filter(f => f.band === n && inRange(f.dateId)).length;
+  const bandOptions = state.prepared?.live ? [ALL_WAVELENGTHS, ...patch.bands] : patch.bands;
+  const bands = bandOptions.map(b => {
+    const prepared = state.prepared?.patches.get(b.number);
+    const entry = flipbookEntry(state.prepared, b.number);
+    const count = prepared ? prepared.frames.filter(frame => inRange(frame.dateId)).length : datesInBand(b.number);
+    const progressive = state.prepared?.live;
+    const available = b.number === state.band || !!prepared || !!progressive;
+    const label = progressive && !prepared ? entry?.status === 'empty' ? 'No frames' :
+      ACTIVE_BAND_STATUSES.has(entry?.status) ? 'Loading…' :
+      entry?.status === 'unavailable' ? 'Retry' : 'Load'
+      : !available ? entry?.status === 'empty' ? 'No frames' :
+      entry?.status === 'queued' || entry?.status === 'running' ? 'Not ready' : 'Unavailable'
+      : `${count} frame${count === 1 ? '' : 's'}`;
+    return `<button type="button" class="band-option ${state.band === b.number ? 'active' : ''}" style="--band-color:${bandColor(b)}" data-action="band" data-band="${b.number}" aria-pressed="${state.band === b.number}" ${available ? '' : 'disabled'}><i class="color-chip" aria-hidden="true"></i> <strong>${esc(rangeLabel(b))}</strong><small>${esc(bandName(b.number))}</small><span class="band-count">${label}</span></button>`;
+  }).join('');
+  const fovs = [20,10,5].map(n => `<button class="pill-button ${state.fov === n && !state.customFov ? 'active' : ''}" type="button" data-action="fov" data-fov="${n}" aria-pressed="${state.fov === n && !state.customFov}" ${n > maxFov ? 'disabled' : ''}>${{20:'Wide',10:'Medium',5:'Close'}[n]} ${n}′</button>`).join('');
+  const detail = `<details class="about" id="frame-details-${scope}" ${state.aboutOpen || section === 'details' ? 'open' : ''}><summary>About this frame <span data-frame-notes>${frameNoteCount(frame)}</span></summary>
+    <div data-frame-details>${frameDetailsBody(frame, band)}</div></details>`;
   const wavelengths = `<section class="settings-section"><h2>Wavelength</h2><p>SPHEREx observes infrared light in six detector bands. Choose a range to see its available frames. Different bands may have different dates and wavelengths within the range.</p>
       <div class="spectrum-ruler" aria-hidden="true">${['#7aa7ff','#4fc3d9','#6dd08a','#e2c54a','#f2994a','#f0776c'].map((color,i) => `<i style="--band-color:${color}" class="${patch.bands.some(b=>b.number===i+1) ? 'present' : ''}"></i>`).join('')}</div>
       <div class="spectrum-ends"><span>0.744 µm</span><span>5.002 µm</span></div><div class="band-list">${bands}</div>
-      <p class="band-footnote">${state.prepared ? 'Verified bands were prepared with 20′ master images. Switching prepared bands and zooming within a loaded image use the images already loaded.' : 'This saved example has Band 4 images.'} The wavelength at the target can change from frame to frame.</p>
-      ${state.prepared && Object.values(state.prepared.bands).some(entry => !['ready', 'partial'].includes(entry.status)) ? '<button class="pill-button" type="button" data-action="retry-preparation">Recheck missing bands</button>' : ''}</section>`;
+      <p class="band-footnote">${state.band === 'all' ? 'All wavelengths shows individual exposures from the six detectors in time order. Each detector has its own fixed brightness scale.' : state.prepared?.live ? 'Select a band to load its real exposures. Ready bands switch immediately.' : state.prepared ? 'Verified bands were prepared with 20′ master images. Switching prepared bands and zooming within a loaded image use the images already loaded.' : 'This saved example has Band 4 images.'} The wavelength at the target can change from frame to frame.</p>
+      ${state.prepared && !state.prepared.live && Object.values(state.prepared.bands).some(entry => !['ready', 'partial'].includes(entry.status)) ? '<button class="pill-button" type="button" data-action="retry-preparation">Recheck missing bands</button>' : ''}</section>`;
   const field = `<section class="settings-section"><h2>Field of view</h2><div class="fov-grid">${fovs}<button class="pill-button ${state.customFov ? 'active' : ''}" type="button" data-action="fov-custom" aria-pressed="${state.customFov}">Custom</button></div>
-      ${state.customFov ? `<div class="custom-fov"><label for="custom-width-${scope}">Width <output>${state.fov}′</output></label><input id="custom-width-${scope}" data-range="fov" type="range" min="3" max="${Math.floor(maxFov)}" value="${state.fov}" step="1" /></div>` : ''}
+      ${state.customFov ? `<div class="custom-fov"><label for="custom-width-${scope}">Width <output>${state.fov}′</output></label><input id="custom-width-${scope}" data-range="fov" type="range" min="1" max="${Math.floor(maxFov)}" value="${state.fov}" step="1" /></div>` : ''}
       <p class="band-footnote">Zoom keeps these same observations and their brightness scale. ${patch.bundledRealExample || patch.fovMaxArcmin < 20 ? `This saved view covers up to ${patch.fovMaxArcmin}′; wider pixels are unavailable.` : 'The 20′ master image was prepared before this viewer opened.'}</p>
       ${state.zoomRequest ? `<p class="band-footnote" role="status">Preparing ${state.zoomRequest.fov}′ from the same exposures…</p>` : ''}
       ${state.zoomError ? `<p class="form-error" role="alert">${esc(state.zoomError)}</p>` : ''}</section>`;
@@ -480,36 +646,98 @@ function recoveryBanner() {
   const attempted = state.recovery.attempted;
   const switchedBand = attempted.band !== state.band;
   const heading = switchedBand
-    ? `Band ${attempted.band} did not load · still showing Band ${state.band}`
-    : `Latest search did not load · still showing Band ${state.band}`;
+    ? `${bandName(attempted.band)} did not load · still showing ${bandName(state.band)}`
+    : `Latest search did not load · still showing ${bandName(state.band)}`;
   return `<div class="recovery-banner" role="alert"><div><strong>${esc(heading)}</strong>
-    <p>${esc(state.recovery.error.message)} The attempted search was Band ${esc(attempted.band)} at ${esc(attempted.fov)}′. The visible image and timeline remain real Band ${esc(state.band)} observations at ${esc(state.fov)}′ from the last successful search. No results from the failed search are displayed.</p></div>
-    <button type="button" class="pill-button" data-action="retry-failed-query">${switchedBand ? `Retry Band ${esc(attempted.band)}` : 'Retry search'}</button></div>`;
+    <p>${esc(state.recovery.error.message)} The attempted search used ${esc(bandName(attempted.band))} at ${esc(attempted.fov)}′. The visible frames are from your previous search at ${esc(state.fov)}′.</p></div>
+    <button type="button" class="pill-button" data-action="retry-failed-query">${switchedBand ? `Retry ${esc(bandName(attempted.band))}` : 'Retry search'}</button></div>`;
+}
+function bandName(number) {
+  return number === 'all' ? 'All wavelengths' : `Band ${number}`;
+}
+
+function flipbookEntry(group, number) {
+  if (number !== 'all') return group?.bands?.[`D${number}`];
+  if (!group?.allRequested) return { status: 'idle' };
+  const entries = Object.values(group.bands);
+  const reported = entries.filter(entry => Number.isFinite(entry.candidate_count));
+  const sum = field => entries.reduce((total, entry) => total + (entry[field] || 0), 0);
+  const active = group.jobStatus === 'running' || entries.some(entry => ACTIVE_BAND_STATUSES.has(entry.status));
+  const hasFrames = entries.some(entry => entry.manifest?.frames?.length);
+  const incomplete = entries.some(entry => entry.status === 'unavailable' || entry.status === 'partial');
+  return {
+    status: active ? 'running' : group.allError ? 'unavailable' : incomplete ? hasFrames ? 'partial' : 'unavailable'
+      : hasFrames ? 'ready' : 'empty',
+    candidate_count: reported.length ? sum('candidate_count') : null,
+    attempted_count: sum('attempted_count'),
+    error: group.allError,
+  };
+}
+
+function unreadyFlipbookPreviews(group, number, type = 'pending') {
+  const records = number === 'all' ? [...group.records.values()] : [group.records.get(number)];
+  return records.flatMap(record => record?.patch.frames || []).filter(frame =>
+    !group.previews.has(frame.imageUrl) && (type === 'failed'
+      ? group.failedPreviews.has(frame.imageUrl) : !group.failedPreviews.has(frame.imageUrl)));
+}
+
+function flipbookNotice() {
+  const group = state.prepared;
+  if (!group?.live) return '';
+  if (group.bandError) return `<p class="notice" role="alert" data-flipbook-progress>${esc(group.bandError)}</p>`;
+  const number = group.wantedBand ?? state.band;
+  const entry = flipbookEntry(group, number);
+  const loadingPreviews = unreadyFlipbookPreviews(group, number).length;
+  if (!group.scheduling.has(number) && !ACTIVE_BAND_STATUSES.has(entry?.status) && !loadingPreviews) {
+    if (group.pinnedBand === number) {
+      return '<div class="saved-real-banner"><div><strong>Shared observation sequence</strong><p>Search this patch to build a longer sequence from the archive.</p></div><button class="pill-button" type="button" data-action="expand-flipbook">Load more observations</button></div>';
+    }
+    const failures = unreadyFlipbookPreviews(group, number, 'failed').length;
+    if (failures) {
+      return `<p class="notice" role="status" data-flipbook-progress>${esc(failures)} image previews could not load in this browser.</p>`;
+    }
+    return '';
+  }
+  let message = number === 'all' ? 'Loading exposures across all wavelengths' : `Loading Band ${number} exposures`;
+  if (number !== state.band) message += ` · ${bandName(state.band)} is still selected`;
+  else if (entry?.candidate_count != null) {
+    message += ` · ${group.patches.get(number)?.frames.length || 0} ready · ${entry.attempted_count || 0} of ${entry.candidate_count} candidates checked`;
+  }
+  return `<p class="notice" role="status" data-flipbook-progress>${esc(message)}</p>`;
 }
 function viewer() {
   const patch = state.patch;
   const frames = visibleFrames();
   const band = selectedBand();
   const frame = currentFrame();
+  const stillBuilding = state.prepared?.live && ACTIVE_BAND_STATUSES.has(flipbookEntry(state.prepared, state.band)?.status);
   return `<main class="viewer-layout"><div class="viewer-main"><div class="stage">
     <div class="provenance"><span class="status-badge ${patch.bundledRealExample ? 'saved-real' : 'real'}" data-real-badge>${patch.bundledRealExample ? 'Saved real SPHEREx observations' : frame ? 'Loading real image…' : 'Real SPHEREx observations'}</span>
     <span class="target-name">${esc(patch.target.name || 'Your patch')} · <span class="mono muted">RA ${esc(state.ra)} · Dec ${esc(state.dec)}</span></span>
-    ${patch.backendStatus === 'partial' ? `<span class="partial-note" role="status">${patch.zoomMissingOuterCount
+    ${patch.backendStatus === 'partial' && !stillBuilding ? `<span class="partial-note" role="status">${patch.zoomMissingOuterCount
       ? `Outer sky pixels unavailable in ${patch.zoomMissingOuterCount} selected frame${patch.zoomMissingOuterCount === 1 ? '' : 's'}; dates and products unchanged`
       : patch.failureCount ? `Partial sequence · ${patch.failureCount} exposure${patch.failureCount === 1 ? '' : 's'} could not be used` : 'Partial date coverage · the archive search was incomplete'}</span>` : ''}</div>
     ${patch.bundledRealExample ? `<div class="saved-real-banner" role="status"><div><strong>Saved real observations · RA 180°, Dec −30° · Band 4 · 5′</strong><p>${staticPreview ? 'This preview plays a saved sequence. Use the full viewer to search other sky coordinates.' : `${state.sampleFallback ? `${esc(state.sampleFallback.message)} ` : ''}These SPHEREx frames were prepared earlier. The saved set may omit newly released observations.`}</p></div>${staticPreview ? '' : '<button type="button" class="pill-button" data-action="retry">Search the archive</button>'}</div>` : ''}
-    ${patch.backendStatus === 'partial' && !patch.bundledRealExample ? `<div class="saved-real-banner" role="status"><div><strong>${patch.zoomMissingOuterCount ? 'Incomplete outer sky coverage' : patch.cachedPartial ? 'Cached partial real observations' : 'Partial real observations'}</strong><p>${patch.zoomMissingOuterCount
+    ${patch.backendStatus === 'partial' && !patch.bundledRealExample && !stillBuilding ? `<div class="saved-real-banner" role="status"><div><strong>${patch.zoomMissingOuterCount ? 'Incomplete outer sky coverage' : patch.cachedPartial ? 'Cached partial real observations' : 'Partial real observations'}</strong><p>${patch.zoomMissingOuterCount
       ? `The ${patch.zoomMissingOuterCount} affected frames retain the same original products, dates, and central pixels; unavailable outer pixels remain transparent.`
       : `${patch.cachedPartial ? 'These actual SPHEREx frames were reused from a recent search. ' : ''}Some observations or dates may be missing. Refresh to check the archive again.`}</p></div><button type="button" class="pill-button" data-action="${patch.zoomMissingOuterCount ? 'retry-same-parent' : 'refresh-observations'}">${patch.zoomMissingOuterCount ? 'Retry same-parent pixels' : 'Refresh observations'}</button></div>` : ''}
     ${recoveryBanner()}
+    ${flipbookNotice()}
     ${frame ? imageStage(frame, band, frames.indexOf(frame), frames) : `<div class="state-card" role="status"><h2>No loaded frames in this range</h2>${staticPreview ? '' : '<p>The archive may have other observations.</p><button class="pill-button" data-action="search-date-range">Search this date range</button>'}<button class="pill-button" data-action="clear-range">All dates</button></div>`}
     ${timeline(frames, band)}
     <div class="mobile-actions"><button class="soft-button" type="button" data-action="open-bands">Wavelength · ${esc(rangeLabel(band))}</button><button class="soft-button" type="button" data-action="open-details">Details &amp; width</button></div>
     </div></div>${settingsPanel()}</main>${state.drawer ? `<dialog class="mobile-drawer" aria-label="${state.drawer === 'bands' ? 'Wavelength settings' : 'Frame details and field of view'}"><div class="drawer-head"><h2>${state.drawer === 'bands' ? 'Wavelength' : 'Details'}</h2><button class="soft-button" type="button" data-action="close-drawer" aria-label="Close panel">Close ✕</button></div>${settingsPanel(state.drawer, 'mobile')}</dialog>` : ''}`;
 }
 function render() {
+  const focused = document.activeElement;
+  const range = focused?.dataset?.range;
+  const action = focused?.dataset?.action;
+  const playbackFocus = ['frame', 'playback-rate'].includes(range) ? `[data-range="${range}"]`
+    : ['prev', 'play', 'next'].includes(action) ? `[data-action="${action}"]` : null;
+  if (state.view !== 'viewer') renderedFrames = [];
   const contents = state.view === 'home' ? home() : state.view === 'viewer' ? viewer() : statusCard(state.view);
   app.innerHTML = `<div class="app-shell ${state.view === 'home' ? 'home-shell' : ''}">${header()}${contents}${footer()}</div>`;
+  if (playbackFocus) app.querySelector(playbackFocus)?.focus({ preventScroll: true });
   if (state.drawer) {
     const dialog = app.querySelector('.mobile-drawer');
     if (dialog) { dialog.showModal(); dialog.querySelector('[data-action="close-drawer"]')?.focus(); }
@@ -532,6 +760,7 @@ function readForm(form) {
       Math.abs(coords.decDeg - previousCoords.decDeg) > 1e-8)) {
     state.from = '';
     state.to = '';
+    if (liveFlipbook) state.band = 'all';
   }
   state.raError = coords.raError;
   state.decError = coords.decError;
@@ -540,10 +769,12 @@ function readForm(form) {
   state.ra = ra; state.dec = dec; state.headerRa = null; state.headerDec = null;
   const sameQuery = [state.ra, state.dec, state.from, state.to].join('|') === previousQuery;
   if (!sameQuery) state.activeDateId = '';
-  if (sameQuery && state.view === 'viewer' && !state.recovery) { syncUrl(); render(); return; }
+  if (sameQuery && state.view === 'viewer' && !state.recovery &&
+      state.prepared?.pinnedBand !== state.band) { syncUrl(); render(); return; }
   loadPatch();
 }
 async function showSavedRealExample({ restoreView = false } = {}) {
+  stopFlipbook();
   cancelZoom();
   state.request?.controller.abort();
   const controller = new AbortController();
@@ -591,12 +822,15 @@ async function preloadPreparedImage(url, signal, refresh = false) {
   try {
     // The proxy can use Cache-Control: no-store. A decoded HTTP <img> alone
     // does not guarantee the next band click is local; a Blob URL does.
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, {
+      signal: controller.signal, cache: refresh ? 'reload' : 'default',
+    });
     if (!response.ok) throw new Error(`Image preview returned HTTP ${response.status}.`);
     blobUrl = URL.createObjectURL(await response.blob());
     const image = new Image();
     image.src = blobUrl;
     await image.decode();
+    if (controller.signal.aborted) throw new DOMException('Image preview cancelled.', 'AbortError');
     if (refresh) return { blobUrl, image };
     preparedImageCache.set(url, { blobUrl, image });
     return blobUrl;
@@ -710,11 +944,395 @@ async function preparePatchSet(coords, restoreSequenceId, signal, request, force
   return { key, patches, bands, timedOut: prepared.timedOut,
     requestedBand: state.band, jobId: prepared.payload.job_id };
 }
+
+function stopFlipbook() {
+  const group = activeFlipbook;
+  if (!group) return;
+  activeFlipbook = null;
+  clearTimeout(group.paintTimer);
+  group.controller.abort();
+}
+
+function scheduleFlipbookPaint(group) {
+  if (activeFlipbook !== group || group.paintTimer != null) return;
+  group.paintTimer = setTimeout(() => {
+    group.paintTimer = null;
+    if (activeFlipbook === group) presentFlipbook(group);
+  }, state.view === 'loading' ? 0 : 160);
+}
+
+function pumpFlipbookPreviews(group) {
+  if (activeFlipbook !== group) return;
+  const order = [...new Set([group.wantedBand, state.band, ...group.records.keys()])];
+  for (const number of order) {
+    const record = group.records.get(number);
+    if (!record) continue;
+    const { frames } = record.patch;
+    const preferred = !group.opened && frames.find(frame => frame.dateId === state.activeDateId);
+    for (const frame of preferred ? [preferred, ...frames] : frames) {
+      if (group.pendingPreviews.size >= FLIPBOOK_IMAGE_WORKERS) return;
+      const url = frame.imageUrl;
+      if (group.previews.has(url) || group.pendingPreviews.has(url) || group.failedPreviews.has(url)) continue;
+      if (typeof Image !== 'function' || typeof URL.createObjectURL !== 'function') {
+        group.previews.set(url, url);
+        continue;
+      }
+      group.pendingPreviews.add(url);
+      preloadPreparedImage(url, group.controller.signal).then(preview => {
+        if (activeFlipbook === group) group.previews.set(url, preview);
+      }).catch(error => {
+        if (activeFlipbook === group && error?.name !== 'AbortError') group.failedPreviews.add(url);
+        // The per-image deadline can also abort a preview. It must be allowed
+        // to finish as a failed preview while the wider search is still active.
+        if (activeFlipbook === group && !group.controller.signal.aborted && error?.name === 'AbortError') {
+          group.failedPreviews.add(url);
+        }
+      }).finally(() => {
+        group.pendingPreviews.delete(url);
+        pumpFlipbookPreviews(group);
+        scheduleFlipbookPaint(group);
+      });
+    }
+  }
+}
+
+function considerFlipbookSnapshot(group, payload) {
+  if (activeFlipbook !== group || payload.job_id !== group.jobId ||
+      Number.isFinite(payload.revision) && payload.revision <= group.revision) return;
+  if (Number.isFinite(payload.revision)) group.revision = payload.revision;
+  group.jobStatus = payload.status;
+  group.bands = { ...payload.bands };
+  if (group.pinnedBand != null) group.bands[`D${group.pinnedBand}`] = { status: 'ready' };
+  for (const [name, entry] of Object.entries(group.bands)) {
+    const number = Number(name.slice(1));
+    if (!entry.manifest) continue;
+    const key = [entry.manifest.sequence_id, entry.manifest.frames?.length, entry.status].join('|');
+    if (group.records.get(number)?.key === key) continue;
+    try {
+      const patch = flipbookBandPatch(entry, { target: group.target, band: number, queryRange: group.queryRange });
+      if (patch) group.records.set(number, { key, patch });
+    } catch (error) {
+      group.bands[name] = { ...entry, status: 'unavailable', error: error.message };
+    }
+  }
+  pumpFlipbookPreviews(group);
+  scheduleFlipbookPaint(group);
+}
+
+function mixedFlipbookPatch(group) {
+  if (!group.allRequested) return null;
+  const patches = [...group.patches.entries()].filter(([number]) => typeof number === 'number').map(([, patch]) => patch);
+  const first = patches[0];
+  if (!first) return null;
+  const progress = flipbookEntry(group, 'all');
+  const key = [progress.status, ...patches.map(patch =>
+    `${patch.sequenceId}:${patch.frames.length}:${patch.backendStatus}`)].join('|');
+  if (group.mixedKey === key) return group.patches.get('all');
+  group.mixedKey = key;
+  const frames = patches.flatMap(patch => patch.frames)
+    .sort((a, b) => a.observedAt.localeCompare(b.observedAt) || a.productId.localeCompare(b.productId));
+  const datesById = new Map(patches.flatMap(patch => patch.dates).map(date => [date.id, date]));
+  const warnings = [...new Set(patches.flatMap(patch => patch.warnings))];
+  if (progress.status === 'partial') warnings.unshift('Some detector exposures could not be prepared.');
+  return {
+    ...first, frames, dates: frames.map(frame => datesById.get(frame.dateId)),
+    sequenceId: null, display: null,
+    displayByBand: Object.fromEntries(patches.map(patch => [patch.frames[0].band, patch.display])),
+    backendStatus: progress.status === 'ready' ? 'ready' : 'partial',
+    warnings,
+    failureCount: Object.values(group.bands).reduce((count, entry) => count + (entry.failure_count || 0), 0),
+    candidateCount: progress.candidate_count,
+    attemptedCount: progress.attempted_count,
+  };
+}
+
+function presentFlipbook(group) {
+  let changed = false;
+  for (const [number, record] of group.records) {
+    const frames = record.patch.frames.filter(frame => group.previews.has(frame.imageUrl));
+    if (!frames.length || record.presented === record.key && record.readyCount === frames.length) continue;
+    record.presented = record.key;
+    record.readyCount = frames.length;
+    const usableDates = new Set(frames.map(frame => frame.dateId));
+    const patch = { ...record.patch,
+      frames: frames.map(frame => ({ ...frame, previewUrl: group.previews.get(frame.imageUrl) })),
+      dates: record.patch.dates.filter(date => usableDates.has(date.id)),
+    };
+    group.patches.set(number, patch);
+    changed = true;
+  }
+  const mixed = mixedFlipbookPatch(group);
+  if (mixed && mixed !== group.patches.get('all')) {
+    group.patches.set('all', mixed);
+    changed = true;
+  }
+
+  const number = group.wantedBand;
+  if (number != null) {
+    const waiting = unreadyFlipbookPreviews(group, number);
+    const patch = group.patches.get(number);
+    const waitingForSharedFrame = !group.opened && waiting.some(frame => frame.dateId === state.activeDateId);
+    if (patch && !waitingForSharedFrame) {
+      const sameBand = state.band === number;
+      stopPlayback(); cancelZoom();
+      state.patch = patch;
+      state.prepared = group;
+      state.band = number;
+      state.fov = Math.min(state.fov, patch.fovMaxArcmin || 20);
+      if (!sameBand || group.opened) state.activeDateId = '';
+      state.linkedSequenceId = patch.sequenceId;
+      state.view = 'viewer';
+      state.request = null;
+      state.error = null;
+      state.recovery = null;
+      state.drawer = '';
+      state.imageError = false;
+      group.opened = true;
+      group.wantedBand = null;
+      settleFrame();
+      lastRealView = realViewSnapshot();
+      prunePreparedImages();
+      syncUrl();
+      render();
+      return;
+    }
+    const entry = flipbookEntry(group, number);
+    if (!group.scheduling.has(number) && !waiting.length &&
+        ['ready', 'partial', 'empty', 'unavailable'].includes(entry?.status)) {
+      const reason = entry.error || (entry.status === 'empty'
+        ? `No usable images were found for ${bandName(number)} at these coordinates and dates.`
+        : `Image previews could not load for ${bandName(number)}.`);
+      group.wantedBand = null;
+      if (group.opened) group.bandError = reason;
+      else if (entry.status !== 'empty' && lastRealView && sameSkyPosition(state, lastRealView)) {
+        failOpeningFlipbook(group, { code: entry.status, message: reason });
+        return;
+      }
+      else {
+        state.band = number;
+        state.patch = null;
+        state.request = null;
+        state.linkedSequenceId = null;
+        state.error = { code: entry.status, message: reason };
+        state.view = 'band-unavailable';
+        syncUrl();
+      }
+      changed = true;
+    }
+  }
+
+  if (state.view === 'viewer' && state.prepared === group) {
+    const patch = group.patches.get(state.band);
+    if (patch && patch !== state.patch) {
+      state.patch = patch;
+      settleFrame();
+      lastRealView = realViewSnapshot();
+      changed = true;
+    }
+  }
+  const stateKey = [state.view, group.wantedBand, group.bandError,
+    group.jobStatus, group.allRequested,
+    ...Object.values(group.bands).map(entry => `${entry.status}:${entry.candidate_count ?? ''}`)].join('|');
+  if (changed || group.lastPaint !== stateKey) {
+    group.lastPaint = stateKey;
+    render();
+  } else {
+    // A progress poll without fresh images only updates the status sentence.
+    const status = app.querySelector('[data-flipbook-progress]');
+    if (status) {
+      const note = flipbookNotice().match(/>([^<]*)<\/p>$/)?.[1];
+      if (note && status.textContent !== note) status.textContent = note;
+    }
+  }
+}
+
+async function pollFlipbook(group) {
+  if (group.polling || group.jobStatus !== 'running' || activeFlipbook !== group) return;
+  group.polling = true;
+  let failures = 0;
+  try {
+    while (activeFlipbook === group && group.jobStatus === 'running') {
+      await waitForFlipbookUpdate(group.controller.signal);
+      try {
+        const payload = await readFlipbook(group.jobId, { signal: group.controller.signal });
+        considerFlipbookSnapshot(group, payload);
+        failures = 0;
+      } catch (error) {
+        if (error?.name === 'AbortError' || error?.code === 'flipbook_unavailable' || ++failures >= 3) throw error;
+      }
+    }
+  } catch (error) {
+    if (activeFlipbook !== group || error?.name === 'AbortError') return;
+    group.jobStatus = 'complete';
+    const reason = error.message || 'Could not check for more SPHEREx images.';
+    group.bandError = reason;
+    if (group.wantedBand === 'all') group.allError = reason;
+    else if (group.wantedBand != null) group.bands[`D${group.wantedBand}`] = { status: 'unavailable', error: reason };
+    scheduleFlipbookPaint(group);
+  } finally {
+    group.polling = false;
+  }
+}
+
+async function startFlipbookJob(group, band, refresh = false) {
+  const { payload, target, queryRange } = await startFlipbook({
+    ...group.query, band, refresh, signal: group.controller.signal,
+  });
+  if (activeFlipbook !== group) return;
+  group.jobId = payload.job_id;
+  group.target = target;
+  group.queryRange = queryRange;
+  group.revision = -1;
+  considerFlipbookSnapshot(group, payload);
+  void pollFlipbook(group);
+}
+
+function failOpeningFlipbook(group, error) {
+  if (activeFlipbook !== group || error?.name === 'AbortError') return;
+  const attempted = {
+    ...group.query, band: state.band, fov: state.fov,
+    customFov: state.customFov, activeDateId: state.activeDateId,
+  };
+  const failure = { code: error.code || 'backend_unavailable', message: error.message || 'The data service did not answer.' };
+  stopFlipbook();
+  state.request = null;
+  if (lastRealView && sameSkyPosition(state, lastRealView)) {
+    restoreRealView();
+    state.recovery = { error: failure, attempted };
+  } else {
+    state.patch = null;
+    state.error = failure;
+    state.view = 'error';
+  }
+  prunePreparedImages();
+  syncUrl();
+  render();
+}
+
+async function loadLiveFlipbook(coords, { restoreSequenceId, forceRefresh }) {
+  stopFlipbook(); cancelZoom(); stopPlayback();
+  state.request?.controller.abort();
+  ++loadSequence;
+  const group = {
+    live: true,
+    controller: new AbortController(),
+    query: { ra: state.ra, dec: state.dec, from: state.from, to: state.to },
+    queryRange: null,
+    target: coords,
+    wantedBand: state.band,
+    allRequested: state.band === 'all',
+    opened: false,
+    revision: -1,
+    bands: Object.fromEntries([1, 2, 3, 4, 5, 6].map(number => [`D${number}`, { status: 'idle' }])),
+    patches: new Map(), records: new Map(), previews: new Map(),
+    pendingPreviews: new Set(), failedPreviews: new Set(), scheduling: new Set(),
+  };
+  const band = state.band;
+  activeFlipbook = group;
+  state.prepared = group;
+  state.request = { controller: group.controller, ...group.query, flipbook: group };
+  state.linkedSequenceId = restoreSequenceId;
+  state.view = 'loading';
+  state.drawer = '';
+  state.error = null;
+  state.recovery = null;
+  state.sampleFallback = null;
+  prunePreparedImages();
+  syncUrl(); render();
+  try {
+    if (!restoreSequenceId) {
+      await startFlipbookJob(group, band, forceRefresh);
+      return;
+    }
+    const restore = fov => restoreRealSequence({ sequenceId: restoreSequenceId,
+      ...group.query, band, fov, signal: group.controller.signal });
+    let patch;
+    try {
+      patch = await restore(20);
+    } catch (error) {
+      if (error?.name === 'AbortError' || state.fov >= 20) throw error;
+      patch = await restore(state.fov);
+      patch.fovMaxArcmin = state.fov;
+      patch.warnings.push(`Wider pixels could not be fetched from these same parent exposures: ${error.message}`);
+    }
+    if (activeFlipbook !== group) return;
+    group.pinnedBand = band;
+    group.bands[`D${band}`] = { status: 'ready' };
+    group.records.set(band, { key: restoreSequenceId, patch });
+    pumpFlipbookPreviews(group);
+    scheduleFlipbookPaint(group);
+  } catch (error) {
+    failOpeningFlipbook(group, error);
+  }
+}
+
+async function chooseLiveBand(group, number) {
+  if (activeFlipbook !== group) return;
+  group.bandError = null;
+  if (number === 'all' && group.pinnedBand != null) {
+    state.band = 'all';
+    state.activeDateId = '';
+    await loadPatch();
+    return;
+  }
+  if (state.view === 'viewer' && state.band === number) {
+    group.wantedBand = null;
+    scheduleFlipbookPaint(group);
+    return;
+  }
+  group.wantedBand = number;
+  if (group.patches.has(number) && (number !== 'all' || group.allRequested)) {
+    presentFlipbook(group);
+    return;
+  }
+  const status = flipbookEntry(group, number)?.status;
+  if (group.scheduling.has(number) || ACTIVE_BAND_STATUSES.has(status)) {
+    scheduleFlipbookPaint(group);
+    return;
+  }
+  const refresh = ['empty', 'unavailable'].includes(status);
+  if (number === 'all') {
+    group.allRequested = true;
+    group.allError = null;
+  }
+  group.scheduling.add(number);
+  if (!group.opened) {
+    state.band = number;
+    state.view = 'loading';
+    state.request = { controller: group.controller, ...group.query, flipbook: group };
+  }
+  scheduleFlipbookPaint(group);
+  try {
+    if (!group.jobId) await startFlipbookJob(group, number, refresh);
+    else {
+      try {
+        const payload = await requestFlipbookBand(group.jobId, number, {
+          signal: group.controller.signal, refresh,
+        });
+        considerFlipbookSnapshot(group, payload);
+        void pollFlipbook(group);
+      } catch (error) {
+        if (error?.code !== 'flipbook_unavailable') throw error;
+        await startFlipbookJob(group, number, refresh);
+      }
+    }
+  } catch (error) {
+    if (activeFlipbook === group && error?.name !== 'AbortError') {
+      if (number === 'all') group.allError = error.message;
+      else group.bands[`D${number}`] = { status: 'unavailable', error: error.message };
+    }
+  } finally {
+    group.scheduling.delete(number);
+    scheduleFlipbookPaint(group);
+  }
+}
+
 async function loadPatch({ forceRefresh = false, restoreSequenceId = null } = {}) {
   if (staticPreview) return showSavedRealExample({ restoreView: true });
   const coords = parseCoordinates(state.ra, state.dec);
   if (!coords.isValid) { state.raError = coords.raError; state.decError = coords.decError; state.view = 'home'; render(); return; }
   state.raError = ''; state.decError = ''; state.dateError = '';
+  if (liveFlipbook) return loadLiveFlipbook(coords, { restoreSequenceId, forceRefresh });
   cancelZoom();
   stopPlayback();
   state.drawer = '';
@@ -796,19 +1414,25 @@ async function loadPatch({ forceRefresh = false, restoreSequenceId = null } = {}
   }
 }
 function resetHome() {
+  stopFlipbook();
   cancelZoom();
   state.request?.controller.abort(); ++loadSequence; stopPlayback();
   state.view = 'home'; state.patch = null; state.drawer = ''; state.request = null;
   state.recovery = null;
   state.sampleFallback = null;
   state.fov = DEFAULT_FOV; state.customFov = false;
-  state.band = 4; state.activeDateId = '';
+  state.band = liveFlipbook ? 'all' : 4; state.activeDateId = '';
   state.linkedSequenceId = null;
   state.prepared = null;
   state.raError = ''; state.decError = ''; state.dateError = ''; state.headerRa = null; state.headerDec = null;
   syncUrl(); render();
 }
 function setBand(number) {
+  if (state.prepared?.live) {
+    if (state.prepared === activeFlipbook) void chooseLiveBand(state.prepared, number);
+    else if (number !== state.band) { state.band = number; state.activeDateId = ''; void loadPatch(); }
+    return;
+  }
   if (number === state.band || !state.patch?.bands.some(b => b.number === number)) return;
   const next = state.prepared?.patches.get(number);
   if (!next) return;
@@ -838,7 +1462,7 @@ function viewPreparedBand(number) {
 function setFov(value, custom = false) {
   const max = Math.min(20, state.patch?.fovMaxArcmin || 20);
   const fov = Number(value);
-  if (!Number.isInteger(fov) || fov < 3 || fov > max) return;
+  if (!Number.isInteger(fov) || fov < 1 || fov > max) return;
   // If a wider raster is already loading, a narrower requested view can use
   // that exact raster on arrival. Avoid a duplicate server build.
   if (state.zoomRequest && fov > (state.patch?.baseFovArcmin || state.fov) &&
@@ -955,6 +1579,19 @@ app.addEventListener('submit', event => {
 app.addEventListener('change', event => {
   if (event.target.dataset.range === 'from' || event.target.dataset.range === 'to') changeRange(event.target.dataset.range, event.target.value);
   if (event.target.dataset.range === 'fov') setFov(Number(event.target.value), true);
+  if (event.target.dataset.range === 'frame') syncUrl();
+  if (event.target.dataset.range === 'playback-rate') {
+    const rate = Number(event.target.value);
+    if (PLAYBACK_RATES.includes(rate)) {
+      state.playbackRate = rate;
+      if (state.playing) setPlayback(true);
+    }
+  }
+});
+app.addEventListener('input', event => {
+  if (event.target.dataset.range !== 'frame') return;
+  stopPlayback();
+  selectFrame(Number(event.target.value) - 1, { share: false });
 });
 app.addEventListener('click', event => {
   const target = event.target.closest('[data-action]');
@@ -968,6 +1605,7 @@ app.addEventListener('click', event => {
   else if (action === 'retry') loadPatch(state.view === 'error' && state.linkedSequenceId
     ? { restoreSequenceId: state.linkedSequenceId } : { forceRefresh: true });
   else if (action === 'refresh-observations') loadPatch({ forceRefresh: true });
+  else if (action === 'expand-flipbook') loadPatch();
   else if (action === 'retry-preparation') loadPatch({ forceRefresh: true });
   else if (action === 'view-prepared-band') viewPreparedBand(Number(target.dataset.band));
   else if (action === 'retry-same-parent') retrySameParentPixels();
@@ -978,6 +1616,7 @@ app.addEventListener('click', event => {
     loadPatch({ forceRefresh: true });
   }
   else if (action === 'return-real' && lastRealView) {
+    stopFlipbook();
     restoreRealView(); state.recovery = null; syncUrl(); render();
   }
   else if (action === 'cancel') resetHome();
@@ -989,8 +1628,11 @@ app.addEventListener('click', event => {
   else if (action === 'prev') { stopPlayback(); stepFrame(-1); }
   else if (action === 'next') { stopPlayback(); stepFrame(1); }
   else if (action === 'play') setPlayback(!state.playing);
-  else if (action === 'date') { stopPlayback(); state.activeDateId = target.dataset.date; syncUrl(); render(); }
-  else if (action === 'band') setBand(Number(target.dataset.band));
+  else if (action === 'date') {
+    stopPlayback();
+    selectFrame(renderedFrames.findIndex(frame => frame.dateId === target.dataset.date));
+  }
+  else if (action === 'band') setBand(target.dataset.band === 'all' ? 'all' : Number(target.dataset.band));
   else if (action === 'fov') setFov(Number(target.dataset.fov));
   else if (action === 'fov-custom') { state.customFov = true; render(); }
   else if (action === 'open-bands') openDrawer('bands', target);
@@ -1002,7 +1644,10 @@ app.addEventListener('click', event => {
   }
 });
 app.addEventListener('toggle', event => {
-  if (event.target.id?.startsWith('frame-details-')) state.aboutOpen = event.target.open;
+  if (event.target.id?.startsWith('frame-details-')) {
+    state.aboutOpen = event.target.open;
+    if (state.aboutOpen) updateFrameDetails();
+  }
 }, true);
 app.addEventListener('load', event => {
   if (!event.target.matches?.('[data-frame-image]')) return;
@@ -1025,7 +1670,7 @@ window.addEventListener('popstate', () => {
   state.ra = p.get('ra') || ''; state.dec = p.get('dec') || '';
   state.from = validDate(p.get('from')) ? p.get('from') : '';
   state.to = validDate(p.get('to')) ? p.get('to') : '';
-  state.band = Number(p.get('band')) || 4; state.activeDateId = p.get('date') || '';
+  state.band = bandFromQuery(p); state.activeDateId = p.get('date') || '';
   state.fov = fovFromQuery(p);
   state.customFov = ![5, 10, 20].includes(state.fov);
   state.linkedSequenceId = /^[a-f0-9]{32}$/.test(p.get('sequence') || '') ? p.get('sequence') : null;

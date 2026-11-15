@@ -2,7 +2,13 @@
 
 The browser calls the same-origin Node development proxy. The proxy forwards the request to `api.py` without changing its JSON body and serves generated PNGs from the backend's `/outputs/` mount. The Python backend performs the IRSA archive work; the browser does not read FITS directly.
 
-## Request
+## Progressive flipbook
+
+The live viewer starts with `POST /api/flipbook` and a JSON body containing `ra_deg`, `dec_deg`, inclusive UTC `start_date` and `end_date`, and `band` as `all` or a detector from `D1` to `D6`. The request sets a fixed 20′ aligned grid. It immediately returns a job with a 32-character `job_id`, `status`, `revision`, and per-detector entries in `bands`. The viewer polls `GET /api/flipbook/<job_id>`. It schedules another detector using `POST /api/flipbook/<job_id>/band/D<n>` or `/band/all`. Pass `refresh=1` on a POST to request a new archive check.
+
+A running detector can already contain a manifest with real PNGs. The browser decodes each new preview and grows the timeline while keeping the current acquisition selected. Each frame has a stable product, timestamp, and URL. Frames are ordered by observation time, including several independent exposures on the same UTC day. All exposures in a band share one WCS grid and fixed brightness scale. The server attempts up to 128 candidate exposures per detector in a bounded time window. Invalid or failed cutouts and incomplete archive listings remain visible through counts and data notes.
+
+## Legacy sequence request
 
 `POST /api/sequence` (proxied to backend `POST /sequence`), `Content-Type: application/json`:
 
@@ -17,13 +23,13 @@ The browser calls the same-origin Node development proxy. The proxy forwards the
 }
 ```
 
-RA and Dec are ICRS decimal degrees; the frontend converts sexagesimal input. The backend requires both inclusive UTC dates, a positive field width of at most 60 arcminutes, and one of `D1` through `D6`. The UI offers widths from 3 to 20 arcminutes and encodes the currently displayed width in the URL. Existing coordinate links without `fov` retain the earlier 10′ default. When a date field is blank, the frontend uses May 1, 2025 for the start and the current UTC day for the end. The archive query clips that interval to the mission period through today, with the final available day extended to midnight on the following day. The original requested dates remain in the manifest. The direct `/sequence` endpoint still builds one selected detector at a time and rejects overlapping direct builds with HTTP 409.
+RA and Dec are ICRS decimal degrees; the frontend converts sexagesimal input. The backend requires both inclusive UTC dates, a positive field width of at most 60 arcminutes, and one of `D1` through `D6`. The UI offers widths from 1 to 20 arcminutes and encodes the currently displayed width in the URL. Existing coordinate links without `fov` retain the earlier 10′ default. When a date field is blank, the frontend uses May 1, 2025 for the start and the current UTC day for the end. The archive query clips that interval to the mission period through today, with the final available day extended to midnight on the following day. The original requested dates remain in the manifest. The direct `/sequence` endpoint still builds one selected detector at a time and rejects overlapping direct builds with HTTP 409.
 
-`POST /api/sequence?refresh=1` forwards to backend `/sequence?refresh=1` with the same JSON body. It bypasses an exact saved sequence and the saved archive listing to probe IRSA again. The viewer uses the preparation route for a new search and **Refresh observations**, and the direct route for **Search this date range** when a loaded range is filtered to no frames. Changing to a narrower date filter otherwise filters loaded frames locally; a range extending outside the loaded query starts a new initial preparation. An empty local filter does not prove that IRSA has no observations in that interval.
+`POST /api/sequence?refresh=1` forwards to backend `/sequence?refresh=1` with the same JSON body. It bypasses an exact saved sequence and the saved archive listing to probe IRSA again. Narrowing a date filter in the viewer uses the loaded frames. An empty local filter does not prove that IRSA has no observations in that interval.
 
-## Prepare bands before opening the viewer
+## Legacy band preparation
 
-The main real-data flow calls `POST /api/prepare` with `ra_deg`, `dec_deg`, inclusive `start_date`/`end_date`, and the requested initial `band` (no FOV parameter). It receives a 32-character `job_id`, `status: "running" | "complete"`, `canonical_fov_arcmin: 20`, `completed_count`, `total_count: 6`, and six entries in `bands` (`D1`…`D6`). The browser polls `GET /api/prepare/<job_id>` while the initial preparation screen is visible. Each entry progresses through `queued`, `running`, then `ready`, `partial`, `empty`, or `unavailable`. Ready/partial entries contain their own genuine `/sequence` manifest. The requested band runs first. A single short unfiltered SIA lookup may be shared across bands only when complete; each detector's source URLs and cutouts remain separately verified.
+The legacy `POST /api/prepare` route accepts the same input as `/api/flipbook` and schedules all six detector bands. Clients poll `GET /api/prepare/<job_id>`. Each entry progresses through `queued`, `running`, then `ready`, `partial`, `empty`, or `unavailable`. Ready and partial entries contain a sequence manifest.
 
 The job has a 105-second shared processing deadline; the browser has a 130-second safety limit, then preloads and decodes all ready frame PNGs into local Blob URLs before opening the viewer. Later band changes and 20′→10′→5′ zooms use these already loaded images without another archive or image request. A band with no verified image, an incomplete upstream lookup, a failed preview download, or an exhausted preparation budget stays disabled with its actual reason. `POST /api/prepare?refresh=1` rechecks partial, empty, and unavailable bands while retaining verified ready manifests; if the refresh fails, previously verified partial frames remain available and are clearly labeled. An explicit refresh, a new sky position, or a widened date range begins another preparation. A shared `sequence=<id>` URL restores that precise product set at up to 20′ before other bands are prepared; another batch result cannot replace its selected sequence.
 
